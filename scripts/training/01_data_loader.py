@@ -22,11 +22,34 @@ from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# paths
-FEATURES_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/features/phoneme_level")
-PROSODY_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/prosody")
-SPLIT_FILE = FEATURES_DIR / "splits.json"
-STATS_FILE = Path("/Users/s.mengari/Desktop/CODE2/results/phoneme_level_target_statistics.json")
+# DATA SOURCE SELECTION
+# Set USE_THESIS_DATA = True to use full thesis data (6770 utterances)
+# Set USE_THESIS_DATA = False to use CODE2 pipeline output (local processing)
+USE_THESIS_DATA = True
+
+# Thesis data paths (full dataset, 6770 utterances)
+THESIS_FEATURES_DIR = Path("/Users/s.mengari/Desktop/THESIS/18_features_pipeline/data/features_18_fixed_phrase_boundary")
+THESIS_PROSODY_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/prosody_full")
+THESIS_SPLIT_FILE = Path("/Users/s.mengari/Desktop/THESIS/18_features_pipeline/results/splits/dataset_splits.json")
+THESIS_STATS_FILE = Path("/Users/s.mengari/Desktop/THESIS/18_features_pipeline/results/phoneme_level_target_statistics.json")
+
+# CODE2 pipeline paths (local processing, e.g., Chapter 2 subset)
+CODE2_FEATURES_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/features/phoneme_level")
+CODE2_PROSODY_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/prosody")
+CODE2_SPLIT_FILE = CODE2_FEATURES_DIR / "splits.json"
+CODE2_STATS_FILE = Path("/Users/s.mengari/Desktop/CODE2/results/phoneme_level_target_statistics.json")
+
+# Select paths based on data source
+if USE_THESIS_DATA:
+    FEATURES_DIR = THESIS_FEATURES_DIR
+    PROSODY_DIR = THESIS_PROSODY_DIR
+    SPLIT_FILE = THESIS_SPLIT_FILE
+    STATS_FILE = THESIS_STATS_FILE
+else:
+    FEATURES_DIR = CODE2_FEATURES_DIR
+    PROSODY_DIR = CODE2_PROSODY_DIR
+    SPLIT_FILE = CODE2_SPLIT_FILE
+    STATS_FILE = CODE2_STATS_FILE
 
 FEATURE_NAMES = [
     'primary_stress_pos', 'word_frequency', 'syllable_count', 'phoneme_count',
@@ -80,7 +103,11 @@ class PhonemeLevelDataset(Dataset):
         train_files = [self.data_dir / fname for fname in splits['splits']['train']]
         all_features = []
         for f in train_files:
-            all_features.append(np.load(f))
+            if f.suffix == '.npz':
+                data = np.load(f, allow_pickle=True)
+                all_features.append(data['features'].astype(np.float32))
+            else:
+                all_features.append(np.load(f).astype(np.float32))
         all_features = np.vstack(all_features)
         
         stats = {}
@@ -99,13 +126,26 @@ class PhonemeLevelDataset(Dataset):
         return len(self.file_paths)
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        npy_file = self.file_paths[idx]
-        features = np.load(npy_file)
-        utt_id = npy_file.stem.replace('_features', '')
+        feat_file = self.file_paths[idx]
+        utt_id = feat_file.stem.replace('_features', '')
         
-        phonemes_file = npy_file.parent / f"{utt_id}_phonemes.json"
-        with open(phonemes_file) as f:
-            phonemes = json.load(f)
+        # load features (handle both .npy and .npz formats)
+        if feat_file.suffix == '.npz':
+            data = np.load(feat_file, allow_pickle=True)
+            features = data['features'].astype(np.float32)
+            phonemes = list(data['phonemes'])
+            
+            # convert 18 features to 30 by padding with zeros
+            # thesis used 18 base features, CODE2 expects 30
+            if features.shape[1] == 18:
+                # pad with 12 zero columns (features 18-29)
+                padding = np.zeros((features.shape[0], 12), dtype=np.float32)
+                features = np.hstack([features, padding])
+        else:
+            features = np.load(feat_file).astype(np.float32)
+            phonemes_file = feat_file.parent / f"{utt_id}_phonemes.json"
+            with open(phonemes_file) as f:
+                phonemes = json.load(f)
         
         if self.max_seq_len and len(features) > self.max_seq_len:
             features = features[:self.max_seq_len]
@@ -133,9 +173,25 @@ class PhonemeLevelDataset(Dataset):
         return sample
     
     def _load_targets(self, utt_id: str, n_phonemes: int) -> Optional[torch.Tensor]:
-        f0_path = self.prosody_dir / f"f0/consensus/{utt_id}_f0.npy"
-        dur_path = self.prosody_dir / f"durations/{utt_id}_durations.npy"
-        energy_path = self.prosody_dir / f"energy/{utt_id}_energy.npy"
+        # handle both thesis data format and CODE2 pipeline format
+        if USE_THESIS_DATA:
+            # Thesis format: frame-level F0/energy, phoneme-level duration
+            f0_norm_dir = Path("/Users/s.mengari/Desktop/THESIS/18_features_pipeline/results/f0_normalized")
+            f0_path = f0_norm_dir / f"{utt_id}_f0_consensus.npy"
+            if not f0_path.exists():
+                f0_path = self.prosody_dir / f"f0_3extractor/consensus/{utt_id}_f0_consensus.npy"
+            
+            dur_path = self.prosody_dir / f"Durations/{utt_id}_durations.npy"
+            
+            # prefer smoothed Praat energy
+            energy_path = self.prosody_dir / f"Energy_praat_smoothed/{utt_id}_energy.npy"
+            if not energy_path.exists():
+                energy_path = self.prosody_dir / f"Energy/{utt_id}_energy.npy"
+        else:
+            # CODE2 pipeline format: all phoneme-level, consistent naming
+            f0_path = self.prosody_dir / f"f0/consensus/{utt_id}_f0.npy"
+            dur_path = self.prosody_dir / f"durations/{utt_id}_durations.npy"
+            energy_path = self.prosody_dir / f"energy/{utt_id}_energy.npy"
         
         if not all(p.exists() for p in [f0_path, dur_path, energy_path]):
             return None
@@ -145,15 +201,41 @@ class PhonemeLevelDataset(Dataset):
         energy = np.load(energy_path)
         
         # align to phoneme count
-        n = min(n_phonemes, len(f0), len(duration), len(energy))
-        f0 = f0[:n]
-        duration = duration[:n]
-        energy = energy[:n]
+        n_targets = min(n_phonemes, len(duration))
+        
+        if USE_THESIS_DATA:
+            # thesis: subsample F0 from frame-level to phoneme-level
+            if len(f0) > n_targets:
+                step_size = max(1, len(f0) // n_targets)
+                f0 = f0[::step_size][:n_targets]
+            else:
+                f0 = f0[:n_targets]
+            
+            # thesis: subsample energy from frame-level to phoneme-level
+            if len(energy) > n_targets:
+                step_size = max(1, len(energy) // n_targets)
+                energy = energy[::step_size][:n_targets]
+            else:
+                energy = energy[:n_targets]
+        else:
+            # CODE2: already phoneme-level, just truncate
+            f0 = f0[:n_targets]
+            energy = energy[:n_targets]
+        
+        duration = duration[:n_targets]
+        
+        # ensure all arrays are same length
+        n_final = min(len(f0), len(duration), len(energy))
+        f0 = f0[:n_final]
+        duration = duration[:n_final]
+        energy = energy[:n_final]
+        
         targets = np.column_stack([f0, duration, energy]).astype(np.float32)
+        n_targets = n_final
         
         # pad if targets shorter than features
-        if n < n_phonemes:
-            pad = np.zeros((n_phonemes - n, 3), dtype=np.float32)
+        if n_targets < n_phonemes:
+            pad = np.zeros((n_phonemes - n_targets, 3), dtype=np.float32)
             targets = np.vstack([targets, pad])
         
         # z-score normalize using train statistics

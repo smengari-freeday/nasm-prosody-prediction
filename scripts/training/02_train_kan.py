@@ -17,6 +17,7 @@
 #
 # usage:
 #   python 02_train_kan.py --epochs 50 --lr 1e-4 --seed 42
+#   python 02_train_kan.py --epochs 50 --lr 1e-4 --seed 42 --level word  # faster, word-level
 
 import argparse
 import json
@@ -40,8 +41,9 @@ OUTPUT_DIR = Path("/Users/s.mengari/Desktop/CODE2/results/training/kan")
 # load data loader and KAN module via exec (avoids import path issues)
 _dl = {'__file__': str(SCRIPTS_DIR / "01_data_loader.py")}
 exec(open(SCRIPTS_DIR / "01_data_loader.py").read(), _dl)
-PhonemeLevelDataset = _dl['PhonemeLevelDataset']
+create_dataloader = _dl['create_dataloader']
 collate_fn = _dl['collate_fn']
+collate_word_fn = _dl['collate_word_fn']
 
 _kan = {}
 exec(open(SCRIPTS_DIR / "true_kan_heads_vectorized.py").read(), _kan)
@@ -100,7 +102,7 @@ def compute_loss(predictions, targets, mask, target_stats):
     return total_loss / 3.0
 
 
-def train_epoch(model, dataloader, optimizer, device, target_stats):
+def train_epoch(model, dataloader, optimizer, device, target_stats, level='phoneme'):
     model.train()
     total_loss = 0.0
     n = 0
@@ -108,7 +110,14 @@ def train_epoch(model, dataloader, optimizer, device, target_stats):
     for batch in tqdm(dataloader, desc="Train", leave=False):
         features = batch['features'].to(device)
         targets = batch['targets'].to(device)
-        mask = batch['attention_mask'].to(device)
+        
+        # word-level: no sequence dimension, add it for model compatibility
+        if level == 'word':
+            features = features.unsqueeze(1)  # (B, 30) -> (B, 1, 30)
+            targets = targets.unsqueeze(1)    # (B, 3) -> (B, 1, 3)
+            mask = torch.ones(features.shape[0], 1, dtype=torch.bool, device=device)
+        else:
+            mask = batch['attention_mask'].to(device)
         
         optimizer.zero_grad()
         predictions = model(features, mask)
@@ -124,7 +133,7 @@ def train_epoch(model, dataloader, optimizer, device, target_stats):
     return total_loss / max(n, 1)
 
 
-def validate(model, dataloader, device, target_stats):
+def validate(model, dataloader, device, target_stats, level='phoneme'):
     model.eval()
     all_preds = {'f0': [], 'duration': [], 'energy': []}
     all_targets = {'f0': [], 'duration': [], 'energy': []}
@@ -133,7 +142,14 @@ def validate(model, dataloader, device, target_stats):
         for batch in dataloader:
             features = batch['features'].to(device)
             targets = batch['targets'].to(device)
-            mask = batch['attention_mask'].to(device)
+            
+            # word-level: add sequence dimension
+            if level == 'word':
+                features = features.unsqueeze(1)
+                targets = targets.unsqueeze(1)
+                mask = torch.ones(features.shape[0], 1, dtype=torch.bool, device=device)
+            else:
+                mask = batch['attention_mask'].to(device)
             
             predictions = model(features, mask)
             mask_np = mask.bool().cpu().numpy()
@@ -176,6 +192,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--patience', type=int, default=10)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--level', type=str, default='phoneme', choices=['phoneme', 'word'])
     args = parser.parse_args()
     
     set_seed(args.seed)
@@ -198,12 +215,12 @@ def main():
     print("=" * 60)
     
     # data loaders
-    train_ds = PhonemeLevelDataset(split_name='train')
-    val_ds = PhonemeLevelDataset(split_name='val')
-    train_loader = DataLoader(train_ds, args.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
-    val_loader = DataLoader(val_ds, args.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0)
+    train_loader = create_dataloader(split_name='train', batch_size=args.batch_size, 
+                                      shuffle=True, num_workers=0, level=args.level)
+    val_loader = create_dataloader(split_name='val', batch_size=args.batch_size,
+                                    shuffle=False, num_workers=0, level=args.level)
     
-    print(f"Train: {len(train_ds)} utterances, Val: {len(val_ds)} utterances")
+    print(f"Train: {len(train_loader.dataset)} samples ({args.level}), Val: {len(val_loader.dataset)} samples")
     print("-" * 60)
     
     # target statistics for loss normalization
@@ -222,8 +239,8 @@ def main():
     
     # training loop
     for epoch in range(args.epochs):
-        train_loss = train_epoch(model, train_loader, optimizer, device, target_stats)
-        val_metrics = validate(model, val_loader, device, target_stats)
+        train_loss = train_epoch(model, train_loader, optimizer, device, target_stats, args.level)
+        val_metrics = validate(model, val_loader, device, target_stats, args.level)
         scheduler.step()
         
         history.append({'epoch': epoch+1, 'train_loss': train_loss, **val_metrics})
@@ -252,7 +269,7 @@ def main():
     # final evaluation on best model
     print("-" * 60)
     model.load_state_dict(torch.load(OUTPUT_DIR / 'best_model.pt', map_location=device))
-    final = validate(model, val_loader, device, target_stats)
+    final = validate(model, val_loader, device, target_stats, args.level)
     
     # save results
     results = {
