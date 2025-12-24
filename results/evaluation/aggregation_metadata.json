@@ -1,0 +1,14 @@
+{
+  "created": "2025-12-16T15:43:24.692863",
+  "kan_dir": "results/training/kan_ch02",
+  "mlp_dir": "results/training/mlp_ch02",
+  "eval_dir": "results/evaluation",
+  "stats_dir": null,
+  "files_created": [
+    "all_training_epochs.csv",
+    "all_final_metrics.csv",
+    "comparison_table.csv",
+    "comparison_table.tex",
+    "r_analysis_ready.csv"
+  ]
+}
