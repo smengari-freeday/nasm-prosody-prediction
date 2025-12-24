@@ -188,8 +188,12 @@ class PhonemeLevelDataset(Dataset):
             if not energy_path.exists():
                 energy_path = self.prosody_dir / f"Energy/{utt_id}_energy.npy"
         else:
-            # CODE2 pipeline format: all phoneme-level, consistent naming
-            f0_path = self.prosody_dir / f"f0/consensus/{utt_id}_f0.npy"
+            # CODE2 pipeline format: frame-level F0 (matches thesis after fix)
+            # use log_f0 (already log-transformed and interpolated)
+            f0_path = self.prosody_dir / f"f0/consensus/{utt_id}_log_f0.npy"
+            if not f0_path.exists():
+                # fallback to old naming if not yet re-extracted
+                f0_path = self.prosody_dir / f"f0/consensus/{utt_id}_f0.npy"
             dur_path = self.prosody_dir / f"durations/{utt_id}_durations.npy"
             energy_path = self.prosody_dir / f"energy/{utt_id}_energy.npy"
         

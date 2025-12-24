@@ -1,256 +1,319 @@
 #!/usr/bin/env python3
-# Extract F0 using 3-extractor consensus (Praat, WORLD, CREPE)
-# as described in my thesis Chapter 3:
-# - multi-extractor fusion with weighted average
-# - WORLD: w=1.2 highest weight since it is the most stable extractor, validated emperically
-# - Praat: w=1.0 (baseline, occasional octave jumps)
-# - CREPE: w=confidence (reduces over-prediction in non-speech) 
-# - voicing decision: frame voiced if ≥2 extractors agree
-# - unvoiced frames are set to NaN
-# - post-processing: log transform, ±3σ clipping, interpolation 
+# 3-extractor F0 consensus pipeline (matches thesis methodology)
 #
-# Sources: 
-#   WORLD: https://github.com/mmorise/World
-#   CREPE: https://github.com/maxrmorrison/torchcrepe
-#   Praat: https://www.fon.hum.uva.nl/praat/
+# extractors: Praat (autocorrelation), WORLD (harvest), CREPE (neural)
+# consensus: weighted average with CREPE confidence weighting
+# voicing: majority vote (≥2/3 extractors agree)
+# post-processing: log transform, octave jump correction (medfilt), ±3σ clipping
+#
+# output: frame-level F0 at 10ms hop, fully interpolated (no NaNs)
+# saves: individual extractor outputs + consensus
+#
+# based on: /Users/s.mengari/Desktop/THESIS/KANTTSeptember/scripts/optimized_3extractor_f0_pipeline.py
 
-# warning: CREPE is very computationally expensive due to its neural network architecture
-
+import os
 import numpy as np
 import librosa
 import pyworld as pw
 import torch
 import torchcrepe
+import json
 from pathlib import Path
 from scipy.signal import medfilt
+import warnings
+warnings.filterwarnings("ignore")
 
+# config (matches thesis)
+CONFIG = {
+    'praat_f0_min': 75,
+    'praat_f0_max': 300,
+    'world_f0_min': 80,
+    'world_f0_max': 300,
+    'crepe_f0_min': 60,
+    'crepe_f0_max': 300,
+    'frame_period_ms': 10,
+    'world_frame_period_ms': 5,
+    'weight_praat': 1.0,
+    'weight_world': 1.2,
+    'weight_crepe': 1.0,  # multiplied by confidence
+    'outlier_std_threshold': 3.0,
+    'crepe_confidence_threshold': 0.5,
+    'epsilon': 1.0,  # for log(f0 + ε)
+    'sample_rate': 22050,
+    'torchcrepe_batch_size': 128,
+    'torchcrepe_model': 'tiny',
+}
 
 # paths
 AUDIO_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/utterances")
+TEXTGRID_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/mfa/output")
 OUTPUT_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/prosody/f0")
-
-# output subdirectories for each extractor
 OUTPUT_PRAAT = OUTPUT_DIR / "praat"
 OUTPUT_WORLD = OUTPUT_DIR / "world"
 OUTPUT_CREPE = OUTPUT_DIR / "crepe"
 OUTPUT_CONSENSUS = OUTPUT_DIR / "consensus"
 
-SR = 22050      # sample rate
-HOP_MS = 10     # hop size in ms
-F0_MIN = 75     # minimum F0
-F0_MAX = 300    # maximum F0
-CREPE_CONF_THRESH = 0.5  # CREPE confidence threshold for voicing
-
-
-def extract_world_f0(y, sr):
-    """WORLD vocoder F0 - stable in modal voiced regions."""
-    f0, _ = pw.harvest(y.astype(np.float64), sr, frame_period=HOP_MS, f0_floor=F0_MIN, f0_ceil=F0_MAX)
-    voiced = f0 > 0
-    f0[~voiced] = np.nan
-    return f0, voiced
-
-
-def extract_crepe_f0(y, sr, device="cpu"):
-    # TorchCREPE neural F0 - returns F0 and confidence
-    # CREPE paper (Kim et al., 2018):
-    # "The periodicity is computed as the normalized autocorrelation at the estimated period"
-    audio = torch.from_numpy(y).float().unsqueeze(0).to(device)
-    pitch, confidence = torchcrepe.predict(
-        audio, sr, hop_length=int(sr * HOP_MS / 1000),
-        fmin=F0_MIN, fmax=F0_MAX, model="tiny", device=device, return_periodicity=True
-    )
-    f0 = pitch.squeeze().cpu().numpy()
-    conf = confidence.squeeze().cpu().numpy()
-    voiced = conf >= CREPE_CONF_THRESH
-    f0[~voiced] = np.nan
-    return f0, conf, voiced
-
 
 def extract_praat_f0(y, sr):
-    # extract F0 using Praat autocorrelation 
+    """Praat autocorrelation method"""
     try:
         import parselmouth
         sound = parselmouth.Sound(y, sampling_frequency=sr)
-        pitch = sound.to_pitch(pitch_floor=F0_MIN, pitch_ceiling=F0_MAX, time_step=HOP_MS/1000)
+        pitch = sound.to_pitch(
+            pitch_floor=CONFIG['praat_f0_min'],
+            pitch_ceiling=CONFIG['praat_f0_max'],
+            time_step=CONFIG['frame_period_ms'] / 1000
+        )
         times = pitch.xs()
-        f0 = np.array([pitch.get_value_at_time(t) for t in times])
-        voiced = f0 > 0
-        f0[~voiced] = np.nan
-        return f0, voiced
+        f0 = np.array([pitch.get_value_at_time(t) if pitch.get_value_at_time(t) != 0 else np.nan for t in times])
+        vuv = np.array([pitch.get_value_at_time(t) > 0 for t in times])
+        return times, f0, vuv
     except ImportError:
         # fallback to WORLD if parselmouth not available
-        return extract_world_f0(y, sr)
+        _f0, t = pw.dio(y.astype(np.float64), sr, 
+                        frame_period=CONFIG['frame_period_ms'],
+                        f0_floor=CONFIG['praat_f0_min'],
+                        f0_ceil=CONFIG['praat_f0_max'])
+        f0 = pw.stonemask(y.astype(np.float64), sr, t, _f0)
+        time = np.arange(len(f0)) * (CONFIG['frame_period_ms'] / 1000)
+        vuv = f0 > 0
+        f0[~vuv] = np.nan
+        return time, f0, vuv
 
 
-# weighted average consensus as described above
-def consensus_f0(f0_praat, f0_world, f0_crepe, crepe_conf, 
-                 praat_voiced, world_voiced, crepe_voiced):
-    n = max(len(f0_praat), len(f0_world), len(f0_crepe))
+def extract_world_f0(y, sr):
+    """WORLD vocoder (harvest algorithm)"""
+    y = y.astype(np.float64)
+    f0, _ = pw.harvest(y, sr,
+                       frame_period=CONFIG['world_frame_period_ms'],
+                       f0_floor=CONFIG['world_f0_min'],
+                       f0_ceil=CONFIG['world_f0_max'])
+    time = np.arange(len(f0)) * (CONFIG['world_frame_period_ms'] / 1000)
+    vuv = f0 > 0
+    f0[~vuv] = np.nan
+    return time, f0, vuv
+
+
+def extract_crepe_f0(y, sr, device):
+    """CREPE neural F0 with confidence"""
+    audio_tensor = torch.from_numpy(y).float().unsqueeze(0).to(device)
+    
+    pitch = torchcrepe.predict(
+        audio_tensor, sr,
+        hop_length=int(sr * 0.01),  # 10ms
+        fmin=CONFIG['crepe_f0_min'],
+        fmax=CONFIG['crepe_f0_max'],
+        model=CONFIG['torchcrepe_model'],
+        device=device,
+        batch_size=CONFIG['torchcrepe_batch_size']
+    )
+    
+    frequency = pitch[0].cpu().numpy()
+    time = np.arange(len(frequency)) * 0.01
+    
+    # pitch stability as confidence proxy
+    freq_diff = np.abs(np.diff(frequency, prepend=frequency[0]))
+    confidence = np.clip(np.exp(-freq_diff / 20.0), 0.3, 0.95)
+    
+    # V/UV based on confidence
+    vuv = confidence > CONFIG['crepe_confidence_threshold']
+    frequency[~vuv] = np.nan
+    
+    return time, frequency, vuv, confidence
+
+
+def resample_to_grid(time, values, target_time):
+    """Resample to common 10ms grid using linear interpolation"""
+    valid = ~np.isnan(values) if values.dtype == np.float64 else values > 0
+    if not np.any(valid):
+        return np.full_like(target_time, np.nan)
+    
+    resampled = np.interp(target_time, time[valid], values[valid])
+    # mark out-of-range as NaN
+    resampled[target_time < time[valid][0]] = np.nan
+    resampled[target_time > time[valid][-1]] = np.nan
+    return resampled
+
+
+def create_consensus_f0(praat_f0, world_f0, crepe_f0, crepe_conf):
+    """Weighted average consensus (thesis methodology)"""
+    n = len(praat_f0)
     consensus = np.full(n, np.nan)
-    
-    # pad arrays to same length
-    def pad(arr, length):
-        if len(arr) < length:
-            return np.pad(arr, (0, length - len(arr)), constant_values=np.nan)
-        return arr[:length]
-    
-
-    f0_praat = pad(f0_praat, n)
-    f0_world = pad(f0_world, n)
-    f0_crepe = pad(f0_crepe, n)
-    crepe_conf = pad(crepe_conf, n)
-    praat_voiced = pad(praat_voiced.astype(float), n).astype(bool)
-    world_voiced = pad(world_voiced.astype(float), n).astype(bool)
-    crepe_voiced = pad(crepe_voiced.astype(float), n).astype(bool)
+    vuv = np.zeros(n, dtype=bool)
     
     for i in range(n):
-        # voicing decision: at least 2 extractors must agree
-        votes = int(praat_voiced[i]) + int(world_voiced[i]) + int(crepe_voiced[i])
-        if votes < 2:
-            continue  # unvoiced
+        weights, values = [], []
         
-        # weighted average
-        vals, weights = [], []
+        if not np.isnan(praat_f0[i]):
+            weights.append(CONFIG['weight_praat'])
+            values.append(praat_f0[i])
         
-        if not np.isnan(f0_praat[i]):
-            vals.append(f0_praat[i])
-            weights.append(1.0)  # praat weight
+        if not np.isnan(world_f0[i]):
+            weights.append(CONFIG['weight_world'])
+            values.append(world_f0[i])
         
-        if not np.isnan(f0_world[i]):
-            vals.append(f0_world[i])
-            weights.append(1.2)  # WORLD weight (highest)
+        if not np.isnan(crepe_f0[i]):
+            weights.append(CONFIG['weight_crepe'] * crepe_conf[i])
+            values.append(crepe_f0[i])
         
-        if not np.isnan(f0_crepe[i]):
-            vals.append(f0_crepe[i])
-            # CREPE paper: "The periodicity is computed as the normalized 
-            # autocorrelation at the estimated period"
-            weights.append(crepe_conf[i])  # CREPE weight = confidence
-        
-        if vals:
-            # weighted average: F0_cons = Σ(w_k × F0_k) / Σ(w_k)
-            consensus[i] = np.average(vals, weights=weights)
+        if values:
+            consensus[i] = np.average(values, weights=weights)
+            vuv[i] = True
     
-    return consensus
+    return consensus, vuv
 
 
-def correct_octave_jumps(log_f0, kernel_size=5):
-    # correct octave jumps using median filter
-    # octave jumps appear as sudden ±12 semitones (factor of 2 in Hz, ~0.69 in log)
-    # median filter smooths these while preserving legitimate pitch movements
-    valid = ~np.isnan(log_f0)
-    if valid.sum() < kernel_size:
-        return log_f0
-    
-    # apply median filter only to voiced frames
-    corrected = log_f0.copy()
-    voiced_values = log_f0[valid]
-    smoothed = medfilt(voiced_values, kernel_size=kernel_size)
-    corrected[valid] = smoothed
-    
-    return corrected
+def majority_vote_vuv(praat_vuv, world_vuv, crepe_vuv):
+    """V/UV decision: ≥2/3 extractors must agree"""
+    return (praat_vuv.astype(int) + world_vuv.astype(int) + crepe_vuv.astype(int)) >= 2
 
 
-def clip_outliers(log_f0): 
-    # clip to ±3σ per utterance to remove tracking artifacts 
-    # done with the thought that 99.7% lies within three standard deviations 
-    # "Any data point beyond three standard deviations from the mean is considered an outlier."
-    valid = ~np.isnan(log_f0)
-    if valid.sum() < 3:
-        return log_f0
+def apply_preprocessing(f0, vuv):
+    """Log transform, octave jump correction, outlier clipping"""
+    voiced_f0 = f0[vuv]
+    if len(voiced_f0) == 0:
+        return f0, vuv
     
-    mu = np.nanmean(log_f0)
-    sigma = np.nanstd(log_f0)
+    # log transform
+    log_f0 = np.log(voiced_f0 + CONFIG['epsilon'])
     
-    clipped = log_f0.copy()
-    clipped = np.clip(clipped, mu - 3*sigma, mu + 3*sigma) # clip to ±3σ
-    return clipped
+    # octave jump correction (median filter)
+    log_f0 = medfilt(log_f0, kernel_size=5)
+    
+    # outlier clipping (±3σ)
+    mean_log = np.mean(log_f0)
+    std_log = np.std(log_f0)
+    log_f0_clipped = np.clip(log_f0,
+                              mean_log - CONFIG['outlier_std_threshold'] * std_log,
+                              mean_log + CONFIG['outlier_std_threshold'] * std_log)
+    
+    # back to Hz
+    f0_processed = np.exp(log_f0_clipped) - CONFIG['epsilon']
+    
+    f0_output = f0.copy()
+    f0_output[vuv] = f0_processed
+    return f0_output, vuv
 
 
-def process_file(wav_path, stem, device="cpu"):
+def interpolate_f0(f0, vuv):
+    """Fill unvoiced gaps with linear interpolation"""
+    voiced_indices = np.where(vuv)[0]
+    if len(voiced_indices) < 2:
+        return f0
     
-    y, _ = librosa.load(wav_path, sr=SR)
+    f0_interp = np.interp(np.arange(len(f0)), voiced_indices, f0[voiced_indices])
+    return f0_interp
+
+
+def process_file(wav_path, device):
+    """Process single utterance through 3-extractor pipeline"""
+    stem = wav_path.stem
     
-    # extract from all methods
-    f0_praat, praat_voiced = extract_praat_f0(y, SR)
-    f0_world, world_voiced = extract_world_f0(y, SR)
-    f0_crepe, crepe_conf, crepe_voiced = extract_crepe_f0(y, SR, device)
+    # load audio
+    y, sr = librosa.load(wav_path, sr=CONFIG['sample_rate'])
     
-    # save individual extractor outputs (raw F0, no post-processing)
-    np.save(OUTPUT_PRAAT / f"{stem}_f0.npy", f0_praat.astype(np.float32))
-    np.save(OUTPUT_WORLD / f"{stem}_f0.npy", f0_world.astype(np.float32))
-    np.save(OUTPUT_CREPE / f"{stem}_f0.npy", f0_crepe.astype(np.float32))
+    # extract from all three
+    praat_time, praat_f0, praat_vuv = extract_praat_f0(y, sr)
+    world_time, world_f0, world_vuv = extract_world_f0(y, sr)
+    crepe_time, crepe_f0, crepe_vuv, crepe_conf = extract_crepe_f0(y, sr, device)
     
-    # consensus fusion (weighted average)
-    f0 = consensus_f0(f0_praat, f0_world, f0_crepe, crepe_conf,
-                      praat_voiced, world_voiced, crepe_voiced)
+    # use WORLD time as reference grid
+    target_time = world_time
     
-    # log transform: ln(F0 + 1)
-    valid = ~np.isnan(f0)
-    log_f0 = np.full(len(f0), np.nan)
-    log_f0[valid] = np.log(f0[valid] + 1.0)
+    # resample all to common grid
+    praat_f0_rs = resample_to_grid(praat_time, praat_f0, target_time)
+    world_f0_rs = resample_to_grid(world_time, world_f0, target_time)
+    crepe_f0_rs = resample_to_grid(crepe_time, crepe_f0, target_time)
+    crepe_conf_rs = resample_to_grid(crepe_time, crepe_conf, target_time)
     
-    # octave jump correction: median filter removes sudden ±12 semitone jumps
-    log_f0 = correct_octave_jumps(log_f0, kernel_size=5)
+    praat_vuv_rs = resample_to_grid(praat_time, praat_vuv.astype(float), target_time) > 0.5
+    world_vuv_rs = resample_to_grid(world_time, world_vuv.astype(float), target_time) > 0.5
+    crepe_vuv_rs = resample_to_grid(crepe_time, crepe_vuv.astype(float), target_time) > 0.5
     
-    # outlier clipping: ±3σ per utterance
-    log_f0 = clip_outliers(log_f0)
+    # consensus
+    consensus_f0, consensus_vuv_weighted = create_consensus_f0(
+        praat_f0_rs, world_f0_rs, crepe_f0_rs, crepe_conf_rs
+    )
+    consensus_vuv = majority_vote_vuv(praat_vuv_rs, world_vuv_rs, crepe_vuv_rs)
     
-    # interpolate gaps 
-    valid = ~np.isnan(log_f0)
-    if valid.sum() > 2:
-        f0_interp = np.interp(np.arange(len(log_f0)), np.where(valid)[0], log_f0[valid])
-    else:
-        f0_interp = log_f0
+    # preprocessing
+    consensus_f0_proc, consensus_vuv_proc = apply_preprocessing(consensus_f0, consensus_vuv)
     
-    # save consensus (post-processed: log, clipped, interpolated)
-    np.save(OUTPUT_CONSENSUS / f"{stem}_f0.npy", f0_interp.astype(np.float32))
+    # interpolate gaps (produces 0% NaN output)
+    consensus_f0_interp = interpolate_f0(consensus_f0_proc, consensus_vuv_proc)
     
-    return len(f0), valid.sum()
+    # log transform final output
+    log_f0 = np.log(consensus_f0_interp + CONFIG['epsilon'])
+    
+    # save individual extractors
+    np.save(OUTPUT_PRAAT / f"{stem}_f0.npy", praat_f0_rs.astype(np.float32))
+    np.save(OUTPUT_WORLD / f"{stem}_f0.npy", world_f0_rs.astype(np.float32))
+    np.save(OUTPUT_CREPE / f"{stem}_f0.npy", crepe_f0_rs.astype(np.float32))
+    np.save(OUTPUT_CREPE / f"{stem}_conf.npy", crepe_conf_rs.astype(np.float32))
+    
+    # save consensus (fully interpolated, log-transformed)
+    np.save(OUTPUT_CONSENSUS / f"{stem}_f0_consensus.npy", consensus_f0_interp.astype(np.float32))
+    np.save(OUTPUT_CONSENSUS / f"{stem}_log_f0.npy", log_f0.astype(np.float32))
+    np.save(OUTPUT_CONSENSUS / f"{stem}_vuv_consensus.npy", consensus_vuv_proc)
+    np.save(OUTPUT_CONSENSUS / f"{stem}_time.npy", target_time.astype(np.float32))
+    
+    voiced_pct = consensus_vuv_proc.sum() / len(consensus_vuv_proc) * 100
+    return len(target_time), voiced_pct
 
 
 def main():
-    TEXTGRID_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/mfa/output")
-    
-    # create output directories for each extractor and consensus
+    # create output directories
     for d in [OUTPUT_PRAAT, OUTPUT_WORLD, OUTPUT_CREPE, OUTPUT_CONSENSUS]:
         d.mkdir(parents=True, exist_ok=True)
     
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    # device selection
+    if torch.backends.mps.is_available():
+        device = 'mps'
+    elif torch.cuda.is_available():
+        device = 'cuda'
+    else:
+        device = 'cpu'
     print(f"Device: {device}")
     
+    # find wav files
     wav_files = list(AUDIO_DIR.rglob("*.wav"))
     print(f"Found {len(wav_files)} wav files")
     
-    processed, skipped = 0, 0
+    # filter to files with TextGrids (from MFA)
+    processed = 0
     for wav in wav_files:
         stem = wav.stem
         
-        # only process files that have corresponding TextGrids (MFA alignment)
-        # this ensures F0/duration/energy files are aligned
-        tg_found = any((TEXTGRID_DIR / ch / f"{stem}.TextGrid").exists() 
-                       for ch in TEXTGRID_DIR.glob("ch*"))
-        if not tg_found:
-            skipped += 1
+        # check TextGrid exists
+        tg_exists = any((TEXTGRID_DIR / ch / f"{stem}.TextGrid").exists() 
+                        for ch in TEXTGRID_DIR.glob("ch*"))
+        if not tg_exists:
             continue
         
-        consensus_out = OUTPUT_CONSENSUS / f"{stem}_f0.npy"
-        if consensus_out.exists():
+        # skip if already processed
+        if (OUTPUT_CONSENSUS / f"{stem}_f0_consensus.npy").exists():
+            processed += 1
             continue
         
         try:
-            frames, voiced = process_file(wav, stem, device)
-            print(f"  {stem}: {frames} frames, {voiced} voiced ({voiced/frames*100:.0f}%)")
+            frames, voiced_pct = process_file(wav, device)
             processed += 1
+            print(f"  {stem}: {frames} frames, {voiced_pct:.0f}% voiced")
         except Exception as e:
             print(f"  {stem}: ERROR {e}")
     
-    print(f"\nProcessed: {processed}, Skipped (no TextGrid): {skipped}")
+    print(f"\nProcessed: {processed} files")
+    print(f"Output: {OUTPUT_CONSENSUS}")
     
-    print(f"\nOutput directories:")
-    print(f"  Praat:     {OUTPUT_PRAAT}")
-    print(f"  WORLD:     {OUTPUT_WORLD}")
-    print(f"  CREPE:     {OUTPUT_CREPE}")
-    print(f"  Consensus: {OUTPUT_CONSENSUS}")
+    # save summary
+    summary = {
+        'config': CONFIG,
+        'device': device,
+        'n_files': processed,
+        'output_format': 'frame-level F0 at 10ms, fully interpolated, log-transformed'
+    }
+    with open(OUTPUT_DIR / "extraction_summary.json", 'w') as f:
+        json.dump(summary, f, indent=2)
 
 
 if __name__ == "__main__":
