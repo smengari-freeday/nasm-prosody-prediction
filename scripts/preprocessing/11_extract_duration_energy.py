@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
-# extract phoneme-level prosody targets from MFA TextGrids and audio
+# extract phoneme-level duration and energy from MFA TextGrids and audio
 #
-# - duration: phoneme offset - onset, then log-transformed: log(dur + ε)
-# - energy: average RMS (dB) per phoneme interval
-# - f0: average consensus F0 (log) per phoneme interval
+# duration: phoneme offset - onset, then log-transformed: log(dur + ε)
+# energy: Praat intensity (dB) per phoneme, z-normalized per speaker
 #
-# all targets are at phoneme level (aligned to TextGrid phone tier)
+# thesis methodology:
+# - uses Praat's intensity extraction (via parselmouth), NOT librosa RMS
+# - median intensity per phoneme (robust to outliers)
+# - z-normalize per speaker/chapter (removes loudness variability)
+# - silence (<-50 dB) marked as NaN
+#
+# based on: /Users/s.mengari/Desktop/THESIS/Thesis Final/Code/scripts/42_re_extract_energy_praat.py
 
 import numpy as np
-import librosa
+import parselmouth
+from parselmouth.praat import call
 from pathlib import Path
 from praatio import textgrid
+from collections import defaultdict
 
+# paths
 AUDIO_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/utterances")
 TEXTGRID_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/mfa/output")
-F0_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/prosody/f0/consensus")
 DURATION_OUT = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/prosody/durations")
 ENERGY_OUT = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/prosody/energy")
 
-# signal processing parameters
-SR = 22050          # sample rate
-HOP = 220           # 10ms hop (22050 * 0.01)
-WIN = 551           # 25ms window (22050 * 0.025)
-MIN_DUR = 0.02      # 20ms minimum phoneme duration threshold
-FRAME_SHIFT = HOP / SR  # 10ms in seconds
+# parameters (match thesis)
+MIN_DUR = 0.02           # 20ms minimum phoneme duration
+INTENSITY_TIME_STEP = 0.01  # 10ms (matches F0 frame rate)
+INTENSITY_MIN_PITCH = 50.0  # Hz (for intensity smoothing)
+SILENCE_THRESHOLD = -50.0   # dB (cutoff for silent segments)
 
 
 def get_phoneme_intervals(tg_path):
@@ -53,32 +59,83 @@ def extract_durations(intervals):
     return np.array(durations, dtype=np.float32)
 
 
-def aggregate_to_phonemes(frame_values, intervals, frame_shift=FRAME_SHIFT):
-    # average frame-level values per phoneme interval
-    phoneme_values = []
-    for _, start, end in intervals:
-        start_frame = int(start / frame_shift)
-        end_frame = int(end / frame_shift)
-        
-        if end_frame > start_frame and end_frame <= len(frame_values):
-            segment = frame_values[start_frame:end_frame]
-            valid = ~np.isnan(segment)
-            if valid.any():
-                phoneme_values.append(np.nanmean(segment))
-            else:
-                phoneme_values.append(np.nan)
-        else:
-            phoneme_values.append(np.nan)
+def extract_praat_intensity(wav_path):
+    # extract intensity contour using Praat (thesis methodology)
+    sound = parselmouth.Sound(str(wav_path))
+    intensity = sound.to_intensity(
+        minimum_pitch=INTENSITY_MIN_PITCH,
+        time_step=INTENSITY_TIME_STEP,
+        subtract_mean=True  # ensures absolute dB values
+    )
+    return intensity
+
+
+def get_intensity_per_phoneme(intensity, intervals, statistic='median'):
+    # map intensity contour to phoneme intervals
+    # uses median (robust to outliers)
+    phoneme_intensities = []
     
-    return np.array(phoneme_values, dtype=np.float32)
+    for _, start, end in intervals:
+        try:
+            if statistic == 'median':
+                # Get quantile 0.5 (median)
+                intensity_val = call(intensity, "Get quantile", start, end, 0.5)
+            else:
+                # Get mean intensity
+                intensity_val = call(intensity, "Get mean", start, end, "energy")
+            
+            # silence detection
+            if intensity_val < SILENCE_THRESHOLD:
+                intensity_val = np.nan
+            
+            phoneme_intensities.append(float(intensity_val) if not np.isnan(intensity_val) else np.nan)
+        except:
+            phoneme_intensities.append(np.nan)
+    
+    return np.array(phoneme_intensities, dtype=np.float32)
 
 
-def extract_energy(wav_path):
-    # extract frame-level RMS energy in dB
-    y, _ = librosa.load(wav_path, sr=SR)
-    rms = librosa.feature.rms(y=y, frame_length=WIN, hop_length=HOP)[0]
-    energy_db = 20 * np.log10(rms + 1e-10)
-    return energy_db
+def compute_speaker_statistics(energy_dict):
+    # compute mean and std per speaker/chapter for normalization
+    speaker_energies = defaultdict(list)
+    
+    for utt_id, energy in energy_dict.items():
+        # extract speaker ID (e.g., 'ch02_sent_001' -> 'ch02')
+        speaker_id = utt_id.split('_')[0]
+        
+        # filter out NaN values
+        valid_energy = energy[~np.isnan(energy)]
+        if len(valid_energy) > 0:
+            speaker_energies[speaker_id].extend(valid_energy.tolist())
+    
+    speaker_stats = {}
+    for speaker_id, energies in speaker_energies.items():
+        energies_array = np.array(energies)
+        mean = float(np.mean(energies_array))
+        std = float(np.std(energies_array))
+        speaker_stats[speaker_id] = (mean, std)
+        print(f"  Speaker {speaker_id}: mean={mean:.2f} dB, std={std:.2f} dB")
+    
+    return speaker_stats
+
+
+def z_normalize_energy(energy_dict, speaker_stats):
+    # z-normalize energy values per speaker/chapter
+    normalized = {}
+    
+    for utt_id, energy in energy_dict.items():
+        speaker_id = utt_id.split('_')[0]
+        
+        if speaker_id in speaker_stats:
+            mean, std = speaker_stats[speaker_id]
+            if std > 1e-8:
+                normalized[utt_id] = (energy - mean) / std
+            else:
+                normalized[utt_id] = energy - mean
+        else:
+            normalized[utt_id] = energy
+    
+    return normalized
 
 
 def main():
@@ -88,6 +145,7 @@ def main():
     wav_files = list(AUDIO_DIR.rglob("*.wav"))
     print(f"Found {len(wav_files)} wav files")
     
+    energy_dict = {}
     processed = 0
     
     for wav in wav_files:
@@ -113,25 +171,42 @@ def main():
         durations = extract_durations(intervals)
         np.save(DURATION_OUT / f"{stem}_durations.npy", durations)
         
-        # energy: average dB per phoneme
-        frame_energy = extract_energy(wav)
-        phoneme_energy = aggregate_to_phonemes(frame_energy, intervals)
-        np.save(ENERGY_OUT / f"{stem}_energy.npy", phoneme_energy)
-        
-        # f0: average log-F0 per phoneme (load pre-computed consensus)
-        f0_file = F0_DIR / f"{stem}_f0.npy"
-        if f0_file.exists():
-            frame_f0 = np.load(f0_file)
-            phoneme_f0 = aggregate_to_phonemes(frame_f0, intervals)
-            # save phoneme-level F0 (overwrite the frame-level file for consistency)
-            np.save(f0_file, phoneme_f0)
+        # energy: Praat intensity per phoneme (dB)
+        try:
+            intensity = extract_praat_intensity(wav)
+            phoneme_energy = get_intensity_per_phoneme(intensity, intervals)
+            energy_dict[stem] = phoneme_energy
+        except Exception as e:
+            print(f"  {stem}: energy extraction failed - {e}")
+            continue
         
         processed += 1
     
     print(f"\nProcessed: {processed} utterances")
-    print(f"Durations: {DURATION_OUT}")
-    print(f"Energy: {ENERGY_OUT}")
-    print(f"F0 (phoneme-level): {F0_DIR}")
+    
+    # z-normalize energy per speaker/chapter
+    if energy_dict:
+        print("\nComputing speaker statistics...")
+        speaker_stats = compute_speaker_statistics(energy_dict)
+        
+        print("\nZ-normalizing energy per speaker...")
+        normalized_energy = z_normalize_energy(energy_dict, speaker_stats)
+        
+        # save normalized energy
+        for utt_id, energy in normalized_energy.items():
+            np.save(ENERGY_OUT / f"{utt_id}_energy.npy", energy)
+        
+        # summary statistics
+        all_energy = np.concatenate([e[~np.isnan(e)] for e in normalized_energy.values()])
+        print(f"\nEnergy statistics (after z-normalization):")
+        print(f"  Mean: {np.mean(all_energy):.4f}")
+        print(f"  Std: {np.std(all_energy):.4f}")
+        print(f"  Range: [{np.min(all_energy):.2f}, {np.max(all_energy):.2f}]")
+        print(f"  NaN phonemes: {sum(np.isnan(e).sum() for e in normalized_energy.values())}")
+    
+    print(f"\nOutput:")
+    print(f"  Durations: {DURATION_OUT}")
+    print(f"  Energy: {ENERGY_OUT}")
 
 
 if __name__ == "__main__":
