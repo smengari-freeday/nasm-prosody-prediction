@@ -37,7 +37,9 @@ OUTPUT_DIR = Path("/Users/s.mengari/Desktop/CODE2/results/training/mlp")
 _dl = {'__file__': str(SCRIPTS_DIR / "01_data_loader.py")}
 exec(open(SCRIPTS_DIR / "01_data_loader.py").read(), _dl)
 PhonemeLevelDataset = _dl['PhonemeLevelDataset']
-collate_fn = _dl['collate_fn']
+WordLevelDataset = _dl['WordLevelDataset']
+collate_phoneme_fn = _dl['collate_phoneme_fn']
+collate_word_fn = _dl['collate_word_fn']
 
 
 class MLPProsodyPredictor(nn.Module):
@@ -98,7 +100,15 @@ def train_epoch(model, dataloader, optimizer, device):
     for batch in tqdm(dataloader, desc="Train", leave=False):
         features = batch['features'].to(device)
         targets = batch['targets'].to(device)
-        mask = batch['attention_mask'].to(device)
+        
+        # handle word-level (2D) vs phoneme-level (3D)
+        is_word_level = features.dim() == 2
+        if is_word_level:
+            features = features.unsqueeze(1)  # (B, F) -> (B, 1, F)
+            targets = targets.unsqueeze(1)    # (B, 3) -> (B, 1, 3)
+            mask = torch.ones(features.shape[0], 1, device=device).bool()
+        else:
+            mask = batch['attention_mask'].to(device)
         
         optimizer.zero_grad()
         predictions = model(features, mask)
@@ -121,7 +131,15 @@ def validate(model, dataloader, device):
         for batch in dataloader:
             features = batch['features'].to(device)
             targets = batch['targets'].to(device)
-            mask = batch['attention_mask'].to(device)
+            
+            # handle word-level (2D) vs phoneme-level (3D)
+            is_word_level = features.dim() == 2
+            if is_word_level:
+                features = features.unsqueeze(1)
+                targets = targets.unsqueeze(1)
+                mask = torch.ones(features.shape[0], 1, device=device).bool()
+            else:
+                mask = batch['attention_mask'].to(device)
             
             predictions = model(features, mask)
             mask_np = mask.bool().cpu().numpy()
@@ -162,6 +180,7 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--level', type=str, default='phoneme', choices=['phoneme', 'word'])
     args = parser.parse_args()
     
     torch.manual_seed(args.seed)
@@ -184,12 +203,22 @@ def main():
     print("=" * 60)
     
     # data loaders
-    train_ds = PhonemeLevelDataset(split_name='train')
-    val_ds = PhonemeLevelDataset(split_name='val')
+    train_ds_phoneme = PhonemeLevelDataset(split_name='train')
+    val_ds_phoneme = PhonemeLevelDataset(split_name='val')
+    
+    if args.level == 'word':
+        train_ds = WordLevelDataset(train_ds_phoneme)
+        val_ds = WordLevelDataset(val_ds_phoneme)
+        collate_fn = collate_word_fn
+    else:
+        train_ds = train_ds_phoneme
+        val_ds = val_ds_phoneme
+        collate_fn = collate_phoneme_fn
+    
     train_loader = DataLoader(train_ds, args.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
     val_loader = DataLoader(val_ds, args.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0)
     
-    print(f"Train: {len(train_ds)} utterances, Val: {len(val_ds)} utterances")
+    print(f"Train: {len(train_ds)} samples ({args.level}), Val: {len(val_ds)} samples")
     print("-" * 60)
     
     # optimizer

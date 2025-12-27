@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple
 # DATA SOURCE SELECTION
 # Set USE_THESIS_DATA = True to use full thesis data (6770 utterances)
 # Set USE_THESIS_DATA = False to use CODE2 pipeline output (local processing)
-USE_THESIS_DATA = True
+USE_THESIS_DATA = True  # Switch to thesis data for comparison
 
 # Thesis data paths (full dataset, 6770 utterances)
 THESIS_FEATURES_DIR = Path("/Users/s.mengari/Desktop/THESIS/18_features_pipeline/data/features_18_fixed_phrase_boundary")
