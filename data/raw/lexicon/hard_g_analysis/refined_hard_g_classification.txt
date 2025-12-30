@@ -1,0 +1,85 @@
+REFINED HARD G (ɡ) CLASSIFICATION REPORT
+======================================
+
+🌍 DEFINITE LOANWORDS (KEEP HARD G ɡ)
+==================================================
+arago                     | aː r aː ɡ oː                   | proper_names
+archipelago               | ɑ r x i p ɛ l aː ɡ oː          | geographic_names
+bakboord                  | b ɑ ɡ b oː r t                 | nautical_foreign
+bakboordszijde            | b ɑ ɡ b oː r t s ɛi d ə        | nautical_foreign
+bakboordzijde             | b ɑ ɡ b oː r t s ɛi d ə        | nautical_foreign
+bougainville              | b u ɡ ɛ̃ v i l                 | proper_names
+bouguer                   | b u ɡ w ɛ r                    | proper_names
+cerigo                    | s ə r i ɡ oː                   | geographic_names
+chesapeakbaai             | t ʃ ɛ s ɑ p i ɡ b aː j         | nautical_foreign
+cingales                  | s ɪ ŋ ɡ eː l s                 | foreign_words
+congo                     | k ɔ ŋ ɡ oː                     | geographic_names
+dugong                    | d ʏ ɡ ɔ ŋ                      | nautical_foreign
+farragut                  | f ɑ r aː ɡ ʏ t                 | proper_names
+gargantua                 | ɡ ɑ r ɡ ə n t y w aː           | proper_names
+gascogne                  | ɡ ɑ s k ɔ ɲ ə                  | geographic_names
+glasgow                   | x l ɑː s ɡ ɑu                  | geographic_names
+go                        | ɡ oː                           | foreign_words
+graphiet                  | ɡ r ɛ f i t                    | foreign_words
+greenwich                 | ɡ r i n ɪ t ʃ                  | geographic_names
+guadeloupe                | ɡ w aː d ə l u p               | geographic_names
+guinea                    | ɡ i n eː j aː                  | geographic_names
+gutta                     | ɡ u t aː                       | foreign_words
+guyana                    | ɡ w i j aː n aː                | geographic_names
+higginson                 | h ɪ ɡ ɪ n s ɔ n                | proper_names
+hungarian                 | h ʏ ŋ ɡ aː r i j ɑ n           | geographic_names
+manga                     | m ɑ ŋ ɡ aː                     | foreign_words
+sargazzo                  | s ɑ r ɡ ɑ t s oː               | nautical_foreign
+singalees                 | s ɪ ŋ ɡ eː l i s               | foreign_words
+uraguay                   | y r aː ɡ w ɑ j                 | geographic_names
+wagner                    | w aː ɡ n ə r                   | proper_names
+
+🇳🇱 DEFINITE NATIVE DUTCH (CONVERT ɡ → ɣ)
+==================================================
+dankbaarheid              | d ɑ ŋ ɡ b aː r h ɛi t          | dutch_compounds
+denkbeeld                 | d ɛ ŋ ɡ b eː l t               | dutch_compounds
+denkbeelden               | d ɛ ŋ ɡ b eː l d ə             | dutch_compounds
+denkbeeldig               | d ɛ ŋ ɡ b eː l d ə x           | dutch_compounds
+denkbeeldige              | d ɛ ŋ ɡ b eː l d ə ɣ ə         | dutch_compounds
+gelijkbeenige             | x ə l ɛi ɡ b eː n ə ɣ ə        | dutch_compounds
+gelijkbeenigen            | x ə l ɛi ɡ b eː n ə ɣ ə        | dutch_compounds
+geographischen            | x eː j oː ɡ r ɛ f i s ə        | dutch_compounds
+gephotographeerd          | x ə p h oː t oː ɡ r ɛ f eː r t | dutch_compounds
+kraakbeenigen             | k r aː ɡ b eː n ə ɣ ə          | dutch_compounds
+ondankbaarheid            | ɔ n d ɑ ŋ ɡ b aː r h ɛi t      | dutch_compounds
+rijksdaalder              | r ɛi ɡ z d aː l d ə r          | dutch_compounds
+rijksdaalders             | r ɛi ɡ z d aː l d ə r s        | dutch_compounds
+
+🇳🇱 LIKELY NATIVE DUTCH (CONVERT ɡ → ɣ)
+==================================================
+drinkbaar                 | d r ɪ ŋ ɡ b aː r               | compound_indicators
+kraakbeenachtige          | k r aː ɡ b eː n ɑ x t ə ɣ ə    | compound_indicators
+kraakbeenderen            | k r aː ɡ b eː n d ə r ə        | compound_indicators
+laakbare                  | l aː ɡ b aː r ə                | compound_indicators
+merkbaar                  | m ɛ r ɡ b aː r                 | compound_indicators
+merkbare                  | m ɛ r ɡ b aː r ə               | compound_indicators
+merkbaren                 | m ɛ r ɡ b aː r ə               | compound_indicators
+onverbreekbaren           | ɔ n v ə r b r eː ɡ b aː r ə    | compound_indicators
+weekdier                  | w eː ɡ d i r                   | compound_indicators
+weekdieren                | w eː ɡ d i r ə                 | compound_indicators
+wenkbrauw                 | w ɛ ŋ ɡ b r ɑu w               | compound_indicators
+wenkbrauwen               | w ɛ ŋ ɡ b r ɑu w ə             | compound_indicators
+zakdoek                   | z ɑ ɡ d u k                    | compound_indicators
+zakdoeken                 | z ɑ ɡ d u k ə                  | compound_indicators
+
+❓ MANUAL REVIEW STILL REQUIRED
+==================================================
+aardrijksbeschrijving     | aː r d r ɛi ɡ z b ə s x r ɛi v ɪ ŋ
+blijkbaar                 | b l ɛi ɡ b aː r
+dekblad                   | d ɛ ɡ b l ɑ t
+gueboroar                 | ɡ ə b oː r oː ɑ r
+guineesche                | ɡ i n eː s ə
+onbereikbare              | ɔ m b ə r ɛi ɡ b aː r ə
+ongenaakbaar              | ɔ ŋ ɣ ə n aː ɡ b aː r
+ongenaakbaarder           | ɔ ŋ ɣ ə n aː ɡ b aː r d ə r
+ongenaakbare              | ɔ ŋ ɣ ə n aː ɡ b aː r ə
+onwrikbaar                | ɔ n w r ɪ ɡ b aː r
+onwrikbare                | ɔ n w r ɪ ɡ b aː r ə
+onwrikbaren               | ɔ n w r ɪ ɡ b aː r ə
+rijkbevolkte              | r ɛi ɡ b ə v ɔ l k t ə
+rijkdommen                | r ɛi ɡ d ɔ m ə

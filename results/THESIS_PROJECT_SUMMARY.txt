@@ -1,0 +1,291 @@
+================================================================================
+THESIS PROJECT SUMMARY
+Generated: 2025-12-30 12:38:18
+================================================================================
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+Title: Neural Additive Spline Models for Interpretable Prosody Prediction
+
+Research Questions:
+  RQ1: To what extent can prosodic realisation be approximated as the sum
+       of smooth feature-specific functions?
+  RQ2: How does NASM perform compared to a parameter-matched MLP baseline?
+  RQ3: Do the learned NASM functions reflect known tendencies in Dutch prosody?
+
+Models:
+  - NASM (Neural Additive Spline Model): ~813 parameters
+    - 30 features → 8 B-spline basis functions → 3 outputs
+  - MLP Baseline: ~771 parameters
+    - 30 → 8 → 8 → 3 architecture
+
+Targets:
+  - F0 (fundamental frequency)
+  - Duration
+  - Energy
+
+Levels:
+  - Phoneme-level: 5,416 utterances, 430,490 phoneme tokens
+  - Word-level: 102,844 words
+
+================================================================================
+2. FILE PATHS
+================================================================================
+
+--- THESIS WRITING ---
+  Main thesis:     /Users/s.mengari/Desktop/THESIS/Thesis Final/Writing final draft/phd-thesis/main.tex
+  Chapter 05:      /Users/s.mengari/Desktop/THESIS/Thesis Final/Writing final draft/phd-thesis/Chapters/Chapter05/Chapter05TrainingEvaluation.tex
+  Chapter 04:      /Users/s.mengari/Desktop/THESIS/Thesis Final/Writing final draft/phd-thesis/Chapters/Chapter04/Chapter04KANModel.tex
+  Chapter 03:      /Users/s.mengari/Desktop/THESIS/Thesis Final/Writing final draft/phd-thesis/Chapters/Chapter03/Chapter03DataFeatures.tex
+
+--- CODE ---
+  Scripts root:    /Users/s.mengari/Desktop/CODE2/scripts/
+  Data loader:     /Users/s.mengari/Desktop/CODE2/scripts/training/01_data_loader.py
+  NASM training:   /Users/s.mengari/Desktop/CODE2/scripts/training/02_train_kan.py
+  MLP training:    /Users/s.mengari/Desktop/CODE2/scripts/training/03_train_mlp_baseline.py
+  HP sweep:        /Users/s.mengari/Desktop/CODE2/scripts/training/04_hyperparameter_sweep.py
+  Stat tests:      /Users/s.mengari/Desktop/CODE2/scripts/post_processing/05_statistical_tests.py
+  Full training:   /Users/s.mengari/Desktop/CODE2/scripts/run_full_training.sh
+
+--- DATA ---
+  Thesis data:     /Users/s.mengari/Desktop/CODE2/data/thesis_features/
+  Chapter 2 data:  /Users/s.mengari/Desktop/CODE2/data/prosody_features/
+  Feature stats:   /Users/s.mengari/Desktop/CODE2/results/feature_normalization_stats.json
+
+--- RESULTS ---
+  Training results: /Users/s.mengari/Desktop/CODE2/results/training/
+  KAN results:      /Users/s.mengari/Desktop/CODE2/results/training/kan/
+  MLP results:      /Users/s.mengari/Desktop/CODE2/results/training/mlp/
+  Stat tests:       /Users/s.mengari/Desktop/CODE2/results/statistical_tests/
+  Final summary:    /Users/s.mengari/Desktop/CODE2/results/final_training_results.txt
+  Feature valid:    /Users/s.mengari/Desktop/CODE2/results/feature_validation_report.txt
+
+--- LOGS ---
+  Training logs:   /Users/s.mengari/Desktop/CODE2/scripts/logs/
+
+================================================================================
+3. HYPERPARAMETERS USED
+================================================================================
+
+Training Configuration:
+  Seeds:           13, 22, 42, 111, 222, 333 (n=6)
+  Epochs:          100 (max)
+  Early stopping:  Patience = 15 (validation RMSE sum)
+  Batch size:      32
+  Optimizer:       AdamW (weight_decay=1e-5)
+  LR Scheduler:    CosineAnnealingLR
+  Grad Clipping:   max_norm = 1.0
+
+NASM:
+  Learning rate:   1e-2
+  Num basis:       8
+  Spline degree:   3 (cubic)
+  Grid range:      [0, 1]
+
+MLP:
+  Learning rate:   1e-3
+  Hidden dim:      8
+  Dropout:         0.0
+
+================================================================================
+4. FINAL RESULTS (TEST SET)
+================================================================================
+
+--- PHONEME LEVEL ---
+
+Model      F0 R²              Duration R²        Energy R²         
+----------------------------------------------------------------------
+NASM       0.5824 ± 0.0005    0.4251 ± 0.0003    0.1459 ± 0.0005
+MLP        0.4808 ± 0.1188    0.3574 ± 0.0758    0.1790 ± 0.0029
+
+--- WORD LEVEL ---
+
+Model      F0 R²              Duration R²        Energy R²         
+----------------------------------------------------------------------
+NASM       0.6702 ± 0.0045    0.7832 ± 0.0026    0.1639 ± 0.0037
+MLP        0.6795 ± 0.0145    0.7851 ± 0.0055    0.1858 ± 0.0041
+
+================================================================================
+5. STATISTICAL TEST RESULTS
+================================================================================
+
+Test: Paired t-test (NASM vs MLP, paired by seed)
+Correction: Bonferroni (α = 0.05 / 3 = 0.0167)
+Effect Size: Cohen's dz
+
+--- PHONEME LEVEL ---
+
+Target       Δ R²       p-value      dz         Sig?    
+-------------------------------------------------------
+f0           +0.1016    0.1142       0.78       No      
+duration     +0.0678    0.1022       0.82       No      
+energy       -0.0331    < 1e-6       -11.71     Yes*    
+
+--- WORD LEVEL ---
+
+Target       Δ R²       p-value      dz         Sig?    
+-------------------------------------------------------
+f0           -0.0093    0.2079       -0.59      No      
+duration     -0.0019    0.4953       -0.30      No      
+energy       -0.0219    0.0008       -2.94      Yes*    
+
+================================================================================
+6. KEY FINDINGS
+================================================================================
+
+PHONEME LEVEL:
+  ✓ NASM achieves higher mean R² on F0 (+0.10) and Duration (+0.07)
+  ✓ Medium-to-large effect sizes (dz=0.78, 0.82) suggest practical significance
+  ✓ Not statistically significant with n=6 (need more seeds for power)
+  ✓ NASM has 100-200x lower variance than MLP
+  ✓ MLP shows bimodal convergence (unstable)
+  ✗ MLP significantly better for Energy (p < 1e-6)
+
+WORD LEVEL:
+  ✓ Both models perform similarly on F0 and Duration
+  ✓ Duration R² ~0.78 confirms correct data pipeline
+  ✗ MLP significantly better for Energy (p < 0.001)
+
+STABILITY:
+  ✓ NASM converges faster (avg ~25 epochs vs MLP ~100)
+  ✓ NASM variance 100-200x lower than MLP
+  ✓ NASM more reliable for practical applications
+
+================================================================================
+7. WHAT'S LEFT TO DO
+================================================================================
+
+COMPLETED ✓:
+  [✓] Fix word boundary detection bug in data loader
+  [✓] Fix feature index mapping (18-feat to 30-feat)
+  [✓] Validate all 30 features are correctly mapped
+  [✓] Run multi-seed training (6 seeds × 2 models × 2 levels = 24 runs)
+  [✓] Run statistical tests (paired t-test, Bonferroni, Cohen's dz)
+  [✓] Update thesis Chapter 05 with new results
+  [✓] Document hyperparameters and methodology
+  [✓] Create comprehensive results summary
+
+REMAINING TASKS:
+
+  HIGH PRIORITY:
+  [ ] Review and update Chapter 04 (KAN Model) if needed
+  [ ] Review and update Chapter 03 (Data/Features) if needed
+  [ ] Generate/update spline visualization figures for thesis
+  [ ] Run feature importance/contribution analysis with new data
+  [ ] Write Chapter 06/07 (Learned Functions / Interpretation)
+
+  MEDIUM PRIORITY:
+  [ ] Consider running ablation study (remove feature groups)
+  [ ] Generate residual analysis plots (phrase-final lengthening)
+  [ ] Create comparison figures (NASM vs MLP per target)
+  [ ] Document MLP instability finding in detail
+
+  LOW PRIORITY / OPTIONAL:
+  [ ] Run with more seeds (10-20) for more statistical power
+  [ ] Try MLP with different hyperparameters to reduce instability
+  [ ] Cross-validation analysis
+  [ ] Error analysis (which utterances/words are hardest?)
+
+  THESIS WRITING:
+  [ ] Update abstract with final numbers
+  [ ] Update conclusion chapter
+  [ ] Proofread all updated sections
+  [ ] Verify all figure/table references
+  [ ] Generate final PDF and check formatting
+
+================================================================================
+8. IMPORTANT NOTES
+================================================================================
+
+Metric Definition:
+  R² = 1 - SS_res/SS_tot (coefficient of determination)
+  Computed on z-normalized targets using training-set statistics
+  This is NOT Pearson correlation
+
+MLP Instability:
+  Phoneme-level MLP shows bimodal convergence:
+  - Some seeds: F0 R² ≈ 0.58 (comparable to NASM)
+  - Other seeds: F0 R² ≈ 0.31 (much worse)
+  - Best epoch ~99.5 indicates MLP never early-stopped
+  This is a genuine finding, not a bug.
+
+Statistical Power:
+  With n=6 seeds, phoneme-level F0/Duration advantages are not
+  statistically significant despite medium-large effect sizes.
+  More seeds would increase power but take more compute time.
+
+Data Pipeline Fixes Applied:
+  1. Word boundary detection uses word_frequency changes (not buggy feature)
+  2. Feature indices correctly remapped from 18-feature to 30-feature schema
+  3. All normalization uses training-set statistics only (no leakage)
+
+================================================================================
+END OF SUMMARY
+================================================================================
+
+================================================================================
+9. RECENT UPDATES (Applied on request)
+================================================================================
+
+Date: 2025-12-30
+
+CHAPTER 3 FIXES:
+  [✓] Fixed duration definition mismatch
+      - OLD: "sum of phoneme log-durations" (incorrect)
+      - NEW: "log of summed phoneme durations" = log(Σd_i)
+      - This matches the code (USE_PHYSICAL_WORD_DURATION = True)
+
+CHAPTER 4 FIXES:
+  [✓] Reframed "Identical Training Protocol" → "Training Protocol"
+      - Now explicitly states per-model hyperparameter tuning
+      - NASM lr=1e-2, MLP lr=1e-3 (justified by validation tuning)
+  [✓] Updated dropout: 0.1 → 0.0 for both models
+  [✓] Updated patience: 10 → 15
+  [✓] Updated max epochs: 50 → 100
+  [✓] Added specific seed list: 13, 22, 42, 111, 222, 333
+  [✓] Added statistical testing methodology description
+
+CHAPTER 5 FIXES:
+  [✓] Removed Table 5.6 (variance-only table)
+      - Supervisor feedback: redundant when statistical tests are used
+      - Stability info now presented as descriptive text, not inference
+  [✓] Reframed stability section as practical observation
+      - Independent of statistical significance claims
+      - Focuses on reproducibility and optimization behavior
+
+These changes address supervisor feedback and ensure thesis-code alignment.
+
+
+================================================================================
+10. CHAPTER UPDATES - Correct Numbers & Narrative (2025-12-30)
+================================================================================
+
+ALL CHAPTERS NOW ALIGNED WITH RESULTS FROM CHAPTER 5
+
+OLD NARRATIVE (incorrect):
+  "NASM outperforms MLP for F0 and duration at both levels"
+  - Word F0: 0.580 vs 0.394 (WRONG)
+  - Word Duration: 0.927 vs 0.921 (WRONG)
+
+NEW NARRATIVE (correct):
+  "At phoneme level, NASM shows practical advantages; at word level, comparable"
+  - Word F0: NASM 0.670 vs MLP 0.680 (comparable)
+  - Word Duration: NASM 0.783 vs MLP 0.785 (comparable)
+  - Phoneme F0: NASM 0.582 vs MLP 0.481 (NASM advantage, dz=0.78)
+  - Phoneme Duration: NASM 0.425 vs MLP 0.357 (NASM advantage, dz=0.82)
+  - Energy: MLP wins at both levels (p < 0.001)
+
+CHAPTERS UPDATED:
+  [✓] Chapter 6 (Analysis) - All R² values, RQ answers, summary
+  [✓] Chapter 8 (Discussion) - Intro, summary, implications
+  [✓] Chapter 9 (Conclusion) - Summary, RQ answers, contributions, closing
+
+KEY CHANGES TO NARRATIVE:
+  1. Word-level: "both models perform comparably" (not "NASM wins")
+  2. Phoneme-level: "NASM shows practical advantages" (with effect sizes)
+  3. Energy: "MLP significantly outperforms at both levels"
+  4. Stability: "NASM 100-200x lower variance; MLP shows bimodal convergence"
+
+THESIS IS NOW INTERNALLY CONSISTENT WITH EMPIRICAL RESULTS

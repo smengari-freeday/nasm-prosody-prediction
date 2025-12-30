@@ -1,21 +1,65 @@
-# Data files (too large for git)
-data/
-results/training*/
-*.npy
-*.pt
-*.wav
-*.mp3
-*.TextGrid
-
 # Python
 __pycache__/
-*.pyc
-.ipynb_checkpoints/
-
-# OS
-.DS_Store
-Thumbs.db
+*.py[cod]
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+ENV/
 
 # IDE
-.vscode/
 .idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Data files (too large for git, reference in README)
+data/webcelex-every-word.txt
+data/raw/audio/
+data/raw/text/
+data/intermediate/
+data/mfa/
+data/processed/
+data/final/
+data/features/
+*.zip
+
+# Keep directory structure
+!data/raw/audio/.gitkeep
+!data/raw/text/.gitkeep
+!data/raw/lexicon/.gitkeep
+
+# Results (can be regenerated)
+results/training/
+results/training_full/
+results/training_final/
+results/training_test/
+results/evaluation/
+results/visualizations/
+results/visualizations_final/
+results/sweeps/
+results/fair_comparison/
+results/analysis/
+results/additional_visualizations/
+*.pt
+*.pdf
+*.png
+
+# Keep summary files
+!results/THESIS_PROJECT_SUMMARY.txt
+!results/ANALYSIS_SUMMARY.md
+!results/statistical_tests/
+
+# Logs
+scripts/logs/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Temporary
+*.tmp
+*.temp

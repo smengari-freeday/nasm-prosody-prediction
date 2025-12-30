@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # extract phoneme-level duration from MFA TextGrids
 #
-# duration: phoneme offset - onset, then log-transformed: log(dur + ε)
-# output: one .npy file per utterance with log-duration per phoneme
+# saves LOG-transformed durations: log(dur + ε)
+# this is the standard format for both phoneme-level and word-level training
+#
+# for word-level Option B (physical duration), the data loader computes:
+#   word_dur = log(sum(exp(log_dur))) = log(sum(raw_dur))
+# no need to re-extract!
 
 import numpy as np
 from pathlib import Path
@@ -35,11 +39,11 @@ def get_phoneme_intervals(tg_path):
 
 
 def extract_durations(intervals):
-    # compute log-duration for each phoneme
+    # extract log-transformed duration: log(dur + ε)
     durations = []
     for _, start, end in intervals:
         dur = end - start
-        durations.append(np.log(dur + 1e-8))  # log transform
+        durations.append(np.log(dur + 1e-8))
     return np.array(durations, dtype=np.float32)
 
 
@@ -59,7 +63,6 @@ def main():
         if len(intervals) == 0:
             continue
         
-        # extract log-durations
         durations = extract_durations(intervals)
         np.save(OUTPUT_DIR / f"{stem}_durations.npy", durations)
         
@@ -74,10 +77,16 @@ def main():
         for f in OUTPUT_DIR.glob("*.npy"):
             all_dur.extend(np.load(f))
         all_dur = np.array(all_dur)
-        print(f"\nDuration statistics (log-transformed):")
+        print(f"\nDuration statistics (log-seconds):")
         print(f"  Mean: {np.mean(all_dur):.4f}")
         print(f"  Std: {np.std(all_dur):.4f}")
         print(f"  Range: [{np.min(all_dur):.2f}, {np.max(all_dur):.2f}]")
+        
+        # show equivalent raw duration range
+        raw_mean = np.exp(np.mean(all_dur)) * 1000
+        raw_min = np.exp(np.min(all_dur)) * 1000
+        raw_max = np.exp(np.max(all_dur)) * 1000
+        print(f"  (Raw: ~{raw_mean:.0f}ms mean, {raw_min:.0f}-{raw_max:.0f}ms range)")
 
 
 if __name__ == "__main__":

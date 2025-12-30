@@ -7,10 +7,11 @@
 # - ~771 parameters total (vs KAN's ~813)
 #
 # training strategy:
-# 1. MSE loss per target (no variance normalization)
+# 1. MSE loss per target (z-normalized, variance-balanced by active target count)
 # 2. Adam optimizer with weight decay
-# 3. no early stopping (fixed epochs, save best on RMSE)
-# 4. padding handled by masking to 0.5 (neutral value)
+# 3. early stopping on sum of per-target RMSE (not a single joint RMSE)
+# 4. padding handled by masking; NaN targets filtered per-target (matches NASM)
+# 5. gradient clipping (1.0) for parity with NASM
 #
 # usage:
 #   python 03_train_mlp_baseline.py --epochs 50 --lr 1e-4 --seed 42
@@ -58,38 +59,37 @@ class MLPProsodyPredictor(nn.Module):
         )
     
     def forward(self, features, attention_mask=None):
-        # mask padded positions to 0.5 (neutral value for normalized features)
-        if attention_mask is not None:
-            mask = attention_mask.unsqueeze(-1).float()
-            features = features * mask + (1 - mask) * 0.5
-        
+        # NOTE: masking is applied in loss only (not here)
+        # this keeps model architecture independent of batching/padding
+        # and ensures identical gradient treatment to NASM
         f0 = self.f0(features)
         dur = self.duration(features)
         en = self.energy(features)
-        
-        if attention_mask is not None:
-            f0 = f0 * mask
-            dur = dur * mask
-            en = en * mask
-        
         return {'f0': f0, 'duration': dur, 'energy': en}
 
 
 def compute_loss(predictions, targets, mask):
-    mask = mask.unsqueeze(-1).float()
-    mask_sum = mask.sum() + 1e-8
+    # targets are z-normalized by data loader, variance-balanced by active target count
+    # all targets use finite filtering for robustness (matches NASM exactly)
+    mask = mask.unsqueeze(-1).bool()
+    losses = []
     
-    f0_loss = ((predictions['f0'] - targets[:, :, 0:1]) ** 2 * mask).sum() / mask_sum
-    dur_loss = ((predictions['duration'] - targets[:, :, 1:2]) ** 2 * mask).sum() / mask_sum
+    for i, name in enumerate(['f0', 'duration', 'energy']):
+        pred = predictions[name]
+        tgt = targets[:, :, i:i+1]
+        
+        # filter NaN/Inf in both targets AND predictions (fully robust)
+        valid = torch.isfinite(tgt) & torch.isfinite(pred)
+        target_mask = (mask & valid).float()
+        denom = target_mask.sum() + 1e-8
+        
+        if denom > 1:
+            loss = ((pred - tgt) ** 2 * target_mask).sum() / denom
+            losses.append(loss)
     
-    # energy: skip NaN values (some utterances may have missing energy)
-    en_tgt = targets[:, :, 2:3]
-    en_valid = torch.isfinite(en_tgt)
-    en_mask = (mask.bool() & en_valid).float()
-    en_sum = en_mask.sum() + 1e-8
-    en_loss = ((predictions['energy'] - en_tgt) ** 2 * en_mask).sum() / en_sum if en_sum > 10 else 0
-    
-    return f0_loss + dur_loss + en_loss
+    if not losses:
+        return None  # caller handles (skip batch)
+    return sum(losses) / len(losses)
 
 
 def train_epoch(model, dataloader, optimizer, device):
@@ -113,9 +113,14 @@ def train_epoch(model, dataloader, optimizer, device):
         optimizer.zero_grad()
         predictions = model(features, mask)
         loss = compute_loss(predictions, targets, mask)
-        loss.backward()
-        optimizer.step()
         
+        # skip batch if no valid targets or invalid loss (matches NASM)
+        if loss is None or not torch.isfinite(loss) or loss.item() <= 0:
+            continue
+        
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
         total_loss += loss.item()
         n += 1
     
@@ -179,15 +184,26 @@ def main():
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--patience', type=int, default=10)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--level', type=str, default='phoneme', choices=['phoneme', 'word'])
     args = parser.parse_args()
     
+    # seed all random sources for reproducibility (matches NASM script)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    import random
+    random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # per-seed output directory (prevents overwriting)
+    run_dir = OUTPUT_DIR / f"{args.level}_seed{args.seed}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    # device selection (match NASM script)
+    device = torch.device('mps' if torch.backends.mps.is_available() else 
+                          'cuda' if torch.cuda.is_available() else 'cpu')
     
     # model
     model = MLPProsodyPredictor(args.hidden_dim, args.dropout).to(device)
@@ -203,30 +219,38 @@ def main():
     print("=" * 60)
     
     # data loaders
+    # For word-level: pass train target stats to val/test to prevent data leakage
     train_ds_phoneme = PhonemeLevelDataset(split_name='train')
     val_ds_phoneme = PhonemeLevelDataset(split_name='val')
+    test_ds_phoneme = PhonemeLevelDataset(split_name='test')
     
     if args.level == 'word':
         train_ds = WordLevelDataset(train_ds_phoneme)
-        val_ds = WordLevelDataset(val_ds_phoneme)
+        word_stats = train_ds.target_stats  # extract train stats
+        val_ds = WordLevelDataset(val_ds_phoneme, external_target_stats=word_stats)
+        test_ds = WordLevelDataset(test_ds_phoneme, external_target_stats=word_stats)
         collate_fn = collate_word_fn
     else:
         train_ds = train_ds_phoneme
         val_ds = val_ds_phoneme
+        test_ds = test_ds_phoneme
         collate_fn = collate_phoneme_fn
     
     train_loader = DataLoader(train_ds, args.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
     val_loader = DataLoader(val_ds, args.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0)
+    test_loader = DataLoader(test_ds, args.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0)
     
-    print(f"Train: {len(train_ds)} samples ({args.level}), Val: {len(val_ds)} samples")
+    print(f"Train: {len(train_ds)} samples ({args.level})")
+    print(f"Val: {len(val_ds)} samples, Test: {len(test_ds)} samples")
     print("-" * 60)
     
     # optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     
-    # best model tracking
+    # best model tracking + early stopping
     best_loss = float('inf')
     best_epoch = 0
+    patience_counter = 0
     history = []
     
     # training loop
@@ -242,34 +266,57 @@ def main():
         if val_loss < best_loss:
             best_loss = val_loss
             best_epoch = epoch + 1
-            torch.save(model.state_dict(), OUTPUT_DIR / 'best_model.pt')
+            patience_counter = 0
+            torch.save(model.state_dict(), run_dir / 'best_model.pt')
             improved = " ✓"
+        else:
+            patience_counter += 1
         
-        print(f"Epoch {epoch+1:2d}/{args.epochs} | Train: {train_loss:.4f} | "
+        print(f"Epoch {epoch+1:2d}/{args.epochs} | Train: {train_loss:.4f} | RMSE_sum: {val_loss:.3f} | "
               f"F0={val_metrics['f0']['r2']:.3f}, "
               f"Dur={val_metrics['duration']['r2']:.3f}, "
               f"En={val_metrics['energy']['r2']:.3f}{improved}")
+        
+        if patience_counter >= args.patience:
+            print(f"Early stopping at epoch {epoch+1} (best: {best_epoch})")
+            break
     
-    # final evaluation on best model
+    # final evaluation on best model (BOTH val and test)
     print("-" * 60)
-    model.load_state_dict(torch.load(OUTPUT_DIR / 'best_model.pt', map_location=device))
-    final = validate(model, val_loader, device)
+    model.load_state_dict(torch.load(run_dir / 'best_model.pt', map_location=device))
+    val_final = validate(model, val_loader, device)
+    test_final = validate(model, test_loader, device)
     
-    # save results
+    # save results with full reproducibility info
     results = {
-        'model': 'mlp', 'seed': args.seed,
-        'config': {'hidden_dim': args.hidden_dim},
+        'model': 'mlp',
+        'seed': args.seed,
+        'level': args.level,
+        'config': {
+            'hidden_dim': args.hidden_dim,
+            'dropout': args.dropout,
+            'lr': args.lr,
+            'batch_size': args.batch_size,
+            'patience': args.patience,
+        },
+        'data': {
+            'use_thesis_data': _dl.get('USE_THESIS_DATA', 'unknown'),
+            'use_physical_word_duration': _dl.get('USE_PHYSICAL_WORD_DURATION', 'unknown'),
+            'n_train': len(train_ds),
+            'n_val': len(val_ds),
+            'n_test': len(test_ds),
+        },
         'best_epoch': best_epoch,
-        'metrics': final,
+        'val_metrics': val_final,
+        'test_metrics': test_final,
         'history': history
     }
-    with open(OUTPUT_DIR / 'results.json', 'w') as f:
+    with open(run_dir / 'results.json', 'w') as f:
         json.dump(results, f, indent=2)
     
     print(f"Best model (epoch {best_epoch}):")
-    print(f"  F0 R²={final['f0']['r2']:.4f}, RMSE={final['f0']['rmse']:.4f}")
-    print(f"  Duration R²={final['duration']['r2']:.4f}, RMSE={final['duration']['rmse']:.4f}")
-    print(f"  Energy R²={final['energy']['r2']:.4f}, RMSE={final['energy']['rmse']:.4f}")
+    print(f"  VAL  - F0={val_final['f0']['r2']:.4f}, Dur={val_final['duration']['r2']:.4f}, En={val_final['energy']['r2']:.4f}")
+    print(f"  TEST - F0={test_final['f0']['r2']:.4f}, Dur={test_final['duration']['r2']:.4f}, En={test_final['energy']['r2']:.4f}")
     print("=" * 60)
 
 

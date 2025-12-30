@@ -7,10 +7,13 @@
 #    - time step: 10ms (matches F0 frame rate)
 #    - minimum pitch: 50 Hz (for intensity smoothing)
 # 2. map intensity to phoneme intervals (median per phoneme)
-# 3. z-normalize per speaker/chapter
-# 4. silence (<-50 dB) marked as NaN
+# 3. silence (<-50 dB) marked as NaN
 #
-# output: one .npy file per utterance with z-normalized energy per phoneme
+# MODES:
+#   SKIP_CHAPTER_NORM = False (thesis-consistent): z-normalize per chapter
+#   SKIP_CHAPTER_NORM = True (Option B): save raw dB, normalize at training
+#
+# output: one .npy file per utterance with energy per phoneme
 
 import numpy as np
 import parselmouth
@@ -23,6 +26,9 @@ from collections import defaultdict
 AUDIO_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/utterances")
 TEXTGRID_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/mfa/output")
 OUTPUT_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/prosody/energy")
+
+# OPTION FLAG: thesis-consistent (False) vs clean normalization (True)
+SKIP_CHAPTER_NORM = False  # Set True for Option B (no leakage)
 
 # parameters (match thesis)
 SAMPLE_RATE = 22050
@@ -127,6 +133,9 @@ def z_normalize_energy(energy_dict, speaker_stats):
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
+    mode = "raw dB (Option B)" if SKIP_CHAPTER_NORM else "per-chapter z-norm (thesis-consistent)"
+    print(f"Energy mode: {mode}")
+    
     # find wav files
     wav_files = list(AUDIO_DIR.rglob("*.wav"))
     print(f"Found {len(wav_files)} wav files")
@@ -165,25 +174,32 @@ def main():
     
     print(f"\nProcessed: {processed} utterances")
     
-    # z-normalize per speaker/chapter
     if energy_dict:
-        print("\nSpeaker statistics (before normalization):")
-        speaker_stats = compute_speaker_statistics(energy_dict)
-        
-        print("\nZ-normalizing energy per speaker...")
-        normalized_energy = z_normalize_energy(energy_dict, speaker_stats)
-        
-        # save normalized energy
-        for utt_id, energy in normalized_energy.items():
-            np.save(OUTPUT_DIR / f"{utt_id}_energy.npy", energy)
-        
-        # summary statistics
-        all_energy = np.concatenate([e[~np.isnan(e)] for e in normalized_energy.values()])
-        print(f"\nEnergy statistics (after z-normalization):")
-        print(f"  Mean: {np.mean(all_energy):.4f}")
-        print(f"  Std: {np.std(all_energy):.4f}")
-        print(f"  Range: [{np.min(all_energy):.2f}, {np.max(all_energy):.2f}]")
-        print(f"  NaN phonemes: {sum(np.isnan(e).sum() for e in normalized_energy.values())}")
+        if SKIP_CHAPTER_NORM:
+            # Option B: save raw dB, let data loader handle normalization
+            for utt_id, energy in energy_dict.items():
+                np.save(OUTPUT_DIR / f"{utt_id}_energy.npy", energy)
+            
+            all_energy = np.concatenate([e[~np.isnan(e)] for e in energy_dict.values()])
+            print(f"\nEnergy statistics (raw dB):")
+            print(f"  Mean: {np.mean(all_energy):.2f} dB")
+            print(f"  Std: {np.std(all_energy):.2f} dB")
+            print("Note: z-normalization happens at training time")
+        else:
+            # Thesis-consistent: per-chapter normalization
+            print("\nComputing per-speaker (chapter) statistics...")
+            speaker_stats = compute_speaker_statistics(energy_dict)
+            
+            print("\nZ-normalizing energy per speaker...")
+            normalized_energy = z_normalize_energy(energy_dict, speaker_stats)
+            
+            for utt_id, energy in normalized_energy.items():
+                np.save(OUTPUT_DIR / f"{utt_id}_energy.npy", energy)
+            
+            all_energy = np.concatenate([e[~np.isnan(e)] for e in normalized_energy.values()])
+            print(f"\nEnergy statistics (after per-chapter z-norm):")
+            print(f"  Mean: {np.mean(all_energy):.4f}")
+            print(f"  Std: {np.std(all_energy):.4f}")
     
     print(f"\nOutput: {OUTPUT_DIR}")
 

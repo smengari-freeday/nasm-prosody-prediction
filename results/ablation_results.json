@@ -1,0 +1,47 @@
+[
+  {
+    "name": "Full (all features)",
+    "linear": 0.188235342502594,
+    "nasm": 0.29109591245651245
+  },
+  {
+    "name": "\u2013 phone_count",
+    "linear": 0.18857437372207642,
+    "nasm": 0.30030447244644165
+  },
+  {
+    "name": "\u2013 syllable_count",
+    "linear": 0.18723666667938232,
+    "nasm": 0.29970622062683105
+  },
+  {
+    "name": "\u2013 phone+syllable",
+    "linear": 0.18617963790893555,
+    "nasm": 0.3036174774169922
+  },
+  {
+    "name": "\u2013 stress_features",
+    "linear": 0.18664389848709106,
+    "nasm": 0.30355972051620483
+  },
+  {
+    "name": "\u2013 boundary_features",
+    "linear": 0.13007456064224243,
+    "nasm": 0.2569722533226013
+  },
+  {
+    "name": "\u2013 position_features",
+    "linear": 0.18806999921798706,
+    "nasm": 0.30500173568725586
+  },
+  {
+    "name": "\u2013 all_prosody_cues",
+    "linear": 0.12869888544082642,
+    "nasm": 0.24265074729919434
+  },
+  {
+    "name": "\u2013 lexical_features",
+    "linear": 0.1813228726387024,
+    "nasm": 0.2893798351287842
+  }
+]

@@ -1,0 +1,48 @@
+WORD-LEVEL STATISTICAL TESTS: NASM vs MLP
+Paired seeds: [13, 22, 42, 111, 222, 333] (n=6)
+Alpha: 0.05, Number of tests (m): 3
+Bonferroni-Corrected Significance Level: 0.016666666666666666
+======================================================================
+
+
+Results Summary
+----------------------------------------------------------------------
+
+F0:
+  NASM mean: 0.6702 (SD = 0.0049)
+  MLP mean:  0.6795 (SD = 0.0158)
+  Difference: -0.0093
+  t(5) = -1.446, p = 0.2079
+  95% CI: [-0.0258, 0.0072]
+  Cohen's dz = -0.590 (medium effect)
+  --> Not significant
+
+DURATION:
+  NASM mean: 0.7832 (SD = 0.0029)
+  MLP mean:  0.7851 (SD = 0.0061)
+  Difference: -0.0019
+  t(5) = -0.735, p = 0.4953
+  95% CI: [-0.0087, 0.0048]
+  Cohen's dz = -0.300 (small effect)
+  --> Not significant
+
+ENERGY:
+  NASM mean: 0.1639 (SD = 0.0041)
+  MLP mean:  0.1858 (SD = 0.0044)
+  Difference: -0.0219
+  t(5) = -7.192, p = 0.0008
+  95% CI: [-0.0297, -0.0141]
+  Cohen's dz = -2.936 (large effect)
+  --> Significant (p < 0.0167)
+
+----------------------------------------------------------------------
+Table for thesis:
+----------------------------------------------------------------------
+Target       NASM         MLP          p-value    dz         Sig?    
+f0           0.670        0.679        0.2079     -0.59       No
+duration     0.783        0.785        0.4953     -0.30       No
+energy       0.164        0.186        0.0008     -2.94       Yes
+----------------------------------------------------------------------
+
+Note: Bonferroni-corrected alpha = 0.0167
+n = 6 paired observations

@@ -172,3 +172,4 @@ echo "Key outputs:"
 ls -la results/visualizations/*.png 2>/dev/null | head -5 || echo "  (visualizations in results/visualizations/)"
 echo ""
 
+

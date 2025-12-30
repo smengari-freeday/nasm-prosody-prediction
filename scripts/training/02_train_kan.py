@@ -3,17 +3,17 @@
 # NASM = Neural Additive Spline Model (single-layer KAN without stacking)
 #
 # architecture:
-# - each input feature has its own learned curve (B-spline) plus linear term
+# - each input feature has its own learned spline curve plus per-feature linear residual
 # - outputs are simply the sum of all feature contributions (additive, no interactions)
 # - fully interpretable: can plot how each feature affects each prosody target
-# - ~813 parameters for default config, dropout(0.1) during training
+# - 813 parameters in default config: 30×3×8 spline coefficients + 30×3 linear residuals + 3 bias
 #
 # training strategy:
-# 1. MSE loss with variance normalization per target
+# 1. MSE loss on z-normalized targets (train-only stats, variance-balanced by active target count)
 # 2. Adam optimizer with cosine annealing LR schedule
-# 3. early stopping on validation RMSE sum (test evaluation is separate)
+# 3. early stopping on sum of per-target RMSE (not a single joint RMSE)
 # 4. gradient clipping for stability
-# 5. masking applied in both forward and loss (redundant but safe)
+# 5. masking applied in both forward and loss; NaN targets filtered per-target
 #
 # usage:
 #   python 02_train_kan.py --epochs 50 --lr 1e-4 --seed 42
@@ -35,7 +35,6 @@ SCRIPTS_DIR = Path("/Users/s.mengari/Desktop/CODE2/scripts/training")
 DATA_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/features/phoneme_level")
 PROSODY_DIR = Path("/Users/s.mengari/Desktop/CODE2/data/intermediate/prosody")
 SPLIT_FILE = DATA_DIR / "splits.json"
-STATS_FILE = Path("/Users/s.mengari/Desktop/CODE2/results/phoneme_level_target_statistics.json")
 OUTPUT_DIR = Path("/Users/s.mengari/Desktop/CODE2/results/training/kan")
 
 # load data loader and KAN module via exec (avoids import path issues)
@@ -65,6 +64,7 @@ class KANProsodyPredictor(nn.Module):
         super().__init__()
         self.kan = TrueKANHead(
             in_dim=30, out_dim=3, num_basis=num_basis, degree=spline_degree,
+            grid_range=(0, 1),  # explicit: features are normalized to [0,1]
             enable_interpretability=True, learn_base_linear=False
         )
     
@@ -79,30 +79,32 @@ class KANProsodyPredictor(nn.Module):
         }
 
 
-def compute_loss(predictions, targets, mask, target_stats):
-    mask = mask.unsqueeze(-1).float()
-    mask_sum = mask.sum() + 1e-8
-    total_loss = 0.0
+def compute_loss(predictions, targets, mask):
+    # targets are z-normalized by data loader (train-only stats)
+    # loss is normalized by number of active targets (variance-balanced)
+    # all targets use finite filtering for robustness (one bad file won't break training)
+    mask = mask.unsqueeze(-1).bool()
+    losses = []
     
     for i, name in enumerate(['f0', 'duration', 'energy']):
         pred = predictions[name]
         tgt = targets[:, :, i:i+1]
-        mse = (pred - tgt) ** 2
         
-        # variance normalization
-        if target_stats and name in target_stats:
-            std = target_stats[name].get('std', 1.0)
-            if std > 1e-6:
-                mse = mse / (std ** 2)
+        # filter NaN/Inf in both targets AND predictions (fully robust)
+        valid = torch.isfinite(tgt) & torch.isfinite(pred)
+        target_mask = (mask & valid).float()
+        denom = target_mask.sum() + 1e-8
         
-        loss = (mse * mask).sum() / mask_sum
-        if torch.isfinite(loss):
-            total_loss += loss
+        if denom > 1:
+            loss = ((pred - tgt) ** 2 * target_mask).sum() / denom
+            losses.append(loss)
     
-    return total_loss / 3.0
+    if not losses:
+        return None  # caller handles (skip batch)
+    return sum(losses) / len(losses)
 
 
-def train_epoch(model, dataloader, optimizer, device, target_stats, level='phoneme'):
+def train_epoch(model, dataloader, optimizer, device, level='phoneme'):
     model.train()
     total_loss = 0.0
     n = 0
@@ -121,19 +123,22 @@ def train_epoch(model, dataloader, optimizer, device, target_stats, level='phone
         
         optimizer.zero_grad()
         predictions = model(features, mask)
-        loss = compute_loss(predictions, targets, mask, target_stats)
+        loss = compute_loss(predictions, targets, mask)
         
-        if torch.isfinite(loss) and loss.item() > 0:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            total_loss += loss.item()
-            n += 1
+        # skip batch if no valid targets or invalid loss
+        if loss is None or not torch.isfinite(loss) or loss.item() <= 0:
+            continue
+        
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        total_loss += loss.item()
+        n += 1
     
     return total_loss / max(n, 1)
 
 
-def validate(model, dataloader, device, target_stats, level='phoneme'):
+def validate(model, dataloader, device, level='phoneme'):
     model.eval()
     all_preds = {'f0': [], 'duration': [], 'energy': []}
     all_targets = {'f0': [], 'duration': [], 'energy': []}
@@ -159,9 +164,11 @@ def validate(model, dataloader, device, target_stats, level='phoneme'):
                 tgt = targets[:, :, i].cpu().numpy()
                 for b in range(pred.shape[0]):
                     m = mask_np[b]
-                    if m.sum() > 0:
-                        all_preds[name].extend(pred[b][m])
-                        all_targets[name].extend(tgt[b][m])
+                    # filter NaNs to prevent RMSE/R² from becoming NaN
+                    valid = m & np.isfinite(tgt[b]) & np.isfinite(pred[b])
+                    if valid.sum() > 0:
+                        all_preds[name].extend(pred[b][valid])
+                        all_targets[name].extend(tgt[b][valid])
     
     # compute R² and RMSE per target
     metrics = {}
@@ -196,7 +203,10 @@ def main():
     args = parser.parse_args()
     
     set_seed(args.seed)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # per-seed output directory (prevents overwriting)
+    run_dir = OUTPUT_DIR / f"{args.level}_seed{args.seed}"
+    run_dir.mkdir(parents=True, exist_ok=True)
     
     device = torch.device('mps' if torch.backends.mps.is_available() else 
                           'cuda' if torch.cuda.is_available() else 'cpu')
@@ -215,17 +225,25 @@ def main():
     print("=" * 60)
     
     # data loaders
+    # For word-level: pass train target stats to val/test to prevent data leakage
     train_loader = create_dataloader(split_name='train', batch_size=args.batch_size, 
                                       shuffle=True, num_workers=0, level=args.level)
+    
+    word_stats = None
+    if args.level == 'word':
+        # extract train stats for consistent val/test normalization
+        word_stats = train_loader.dataset.target_stats
+    
     val_loader = create_dataloader(split_name='val', batch_size=args.batch_size,
-                                    shuffle=False, num_workers=0, level=args.level)
+                                    shuffle=False, num_workers=0, level=args.level,
+                                    word_target_stats=word_stats)
+    test_loader = create_dataloader(split_name='test', batch_size=args.batch_size,
+                                     shuffle=False, num_workers=0, level=args.level,
+                                     word_target_stats=word_stats)
     
-    print(f"Train: {len(train_loader.dataset)} samples ({args.level}), Val: {len(val_loader.dataset)} samples")
+    print(f"Train: {len(train_loader.dataset)} samples ({args.level})")
+    print(f"Val: {len(val_loader.dataset)} samples, Test: {len(test_loader.dataset)} samples")
     print("-" * 60)
-    
-    # target statistics for loss normalization
-    with open(STATS_FILE) as f:
-        target_stats = json.load(f)
     
     # optimizer and scheduler
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
@@ -239,8 +257,8 @@ def main():
     
     # training loop
     for epoch in range(args.epochs):
-        train_loss = train_epoch(model, train_loader, optimizer, device, target_stats, args.level)
-        val_metrics = validate(model, val_loader, device, target_stats, args.level)
+        train_loss = train_epoch(model, train_loader, optimizer, device, args.level)
+        val_metrics = validate(model, val_loader, device, args.level)
         scheduler.step()
         
         history.append({'epoch': epoch+1, 'train_loss': train_loss, **val_metrics})
@@ -252,12 +270,12 @@ def main():
             best_loss = val_loss
             best_epoch = epoch + 1
             patience_counter = 0
-            torch.save(model.state_dict(), OUTPUT_DIR / 'best_model.pt')
+            torch.save(model.state_dict(), run_dir / 'best_model.pt')
             improved = " ✓"
         else:
             patience_counter += 1
         
-        print(f"Epoch {epoch+1:2d}/{args.epochs} | Train: {train_loss:.4f} | "
+        print(f"Epoch {epoch+1:2d}/{args.epochs} | Train: {train_loss:.4f} | RMSE_sum: {val_loss:.3f} | "
               f"F0={val_metrics['f0']['r2']:.3f}, "
               f"Dur={val_metrics['duration']['r2']:.3f}, "
               f"En={val_metrics['energy']['r2']:.3f}{improved}")
@@ -266,26 +284,43 @@ def main():
             print(f"Early stopping at epoch {epoch+1} (best: {best_epoch})")
             break
     
-    # final evaluation on best model
+    # final evaluation on best model (BOTH val and test)
     print("-" * 60)
-    model.load_state_dict(torch.load(OUTPUT_DIR / 'best_model.pt', map_location=device))
-    final = validate(model, val_loader, device, target_stats, args.level)
+    model.load_state_dict(torch.load(run_dir / 'best_model.pt', map_location=device))
+    val_final = validate(model, val_loader, device, args.level)
+    test_final = validate(model, test_loader, device, args.level)
     
-    # save results
+    # save results with full reproducibility info
     results = {
-        'model': 'kan', 'seed': args.seed,
-        'config': {'num_basis': args.num_basis, 'spline_degree': args.spline_degree},
+        'model': 'nasm',  # Neural Additive Spline Model
+        'seed': args.seed,
+        'level': args.level,
+        'config': {
+            'num_basis': args.num_basis,
+            'spline_degree': args.spline_degree,
+            'grid_range': [0, 1],
+            'lr': args.lr,
+            'batch_size': args.batch_size,
+            'patience': args.patience,
+        },
+        'data': {
+            'use_thesis_data': _dl.get('USE_THESIS_DATA', 'unknown'),
+            'use_physical_word_duration': _dl.get('USE_PHYSICAL_WORD_DURATION', 'unknown'),
+            'n_train': len(train_loader.dataset),
+            'n_val': len(val_loader.dataset),
+            'n_test': len(test_loader.dataset),
+        },
         'best_epoch': best_epoch,
-        'metrics': final,
+        'val_metrics': val_final,
+        'test_metrics': test_final,
         'history': history
     }
-    with open(OUTPUT_DIR / 'results.json', 'w') as f:
+    with open(run_dir / 'results.json', 'w') as f:
         json.dump(results, f, indent=2)
     
     print(f"Best model (epoch {best_epoch}):")
-    print(f"  F0 R²={final['f0']['r2']:.4f}, RMSE={final['f0']['rmse']:.4f}")
-    print(f"  Duration R²={final['duration']['r2']:.4f}, RMSE={final['duration']['rmse']:.4f}")
-    print(f"  Energy R²={final['energy']['r2']:.4f}, RMSE={final['energy']['rmse']:.4f}")
+    print(f"  VAL  - F0={val_final['f0']['r2']:.4f}, Dur={val_final['duration']['r2']:.4f}, En={val_final['energy']['r2']:.4f}")
+    print(f"  TEST - F0={test_final['f0']['r2']:.4f}, Dur={test_final['duration']['r2']:.4f}, En={test_final['energy']['r2']:.4f}")
     print("=" * 60)
 
 

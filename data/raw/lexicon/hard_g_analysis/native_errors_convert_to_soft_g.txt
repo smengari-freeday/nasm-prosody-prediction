@@ -1,0 +1,10 @@
+# NATIVE DUTCH ERRORS - CONVERT TO SOFT G (ɣ)
+# These words should use soft g pronunciation
+
+dankbaarheid	d ɑ ŋ ɡ b aː r h ɛi t
+gelijkbeenige	x ə l ɛi ɡ b eː n ə ɣ ə
+gelijkbeenigen	x ə l ɛi ɡ b eː n ə ɣ ə
+geographischen	x eː j oː ɡ r ɛ f i s ə
+gephotographeerd	x ə p h oː t oː ɡ r ɛ f eː r t
+kraakbeenigen	k r aː ɡ b eː n ə ɣ ə
+ondankbaarheid	ɔ n d ɑ ŋ ɡ b aː r h ɛi t
